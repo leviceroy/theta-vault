@@ -5,6 +5,56 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [3.5.0] — 2026-05-16
+
+### Fixed
+
+**Theta proxy: linear → sqrt-of-time decay model (dashboard + unrealized P&L)**
+- `portfolio.ts` unrealized P&L estimate now uses `credit × qty × 100 × (1 − √(remaining/entry))` — matches the extrinsic remaining model displayed in TradeDetail
+- Linear `θ × days` understated early decay and overstated late; sqrt-of-time is correct for all DTE windows
+- Falls back to linear only for debit spreads or trades missing `credit_received`/`entry_dte`
+
+**θ/NLQ denominator: include unrealized P&L**
+- Denominator changed from `balance` (realized only) to `balance + unrealized_pnl`
+- tastytrade Net Liquidation = realized + unrealized; prior calculation overstated ratio when open positions were underwater
+- Fixed in both `portfolio.ts` (snapshot) and `AppShell.tsx` (live re-computation)
+
+**CSP BPR: add `margin_account` setting**
+- New `margin_account: boolean` field in `AppSettings` (default: `false` — cash account)
+- When `true`, CSP BPR = 20% notional (Reg T margin) instead of 100% (full cash collateral)
+- Cascades through `calculateBpr`, `TradeForm`, `JournalTab`; persisted to settings DB
+
+**Per-leg IV in live Greek re-estimation**
+- Live Greek re-estimation in `AppShell.tsx` and `TradeDetail.tsx` now passes `leg.iv` to `estimateLegGreeks`
+- ICs and strangles on SPY/SPX have 5–10 vol point put skew; single IV for all legs was materially misstating net delta
+
+**"Unrlzd Est." card rename (dashboard)**
+- KPI card previously labeled "θ Est." (conflicting with adjacent "Theta/Day" Greek card) renamed to "Unrlzd Est."
+- Disambiguates estimated unrealized P&L from the theta Greek
+
+**P50 and PIT: use live spot for open trades (TradeDetail)**
+- Both metrics now use `spotForGreeks ?? t.underlying_price` — live price when available
+- First-passage probability (P50) and terminal probability (PIT) are spot-dependent; using stale entry price was incorrect
+
+**thetaPace unit mismatch fixed (TradeDetail)**
+- `thetaPace` now computes `Math.abs(liveGreeks?.theta ?? (theta × qty × 100)) × remainingDte`
+- Stored theta is per-share; comparison against dollar `maxProfit` without scaling caused this metric to always evaluate false
+
+**Jade Lizard leg template corrected (TradeForm)**
+- Template changed from `[SP, SC]` (which was a strangle) to `[SP, SC, LC]`
+- Jade Lizard = short put + call spread (short call + long call wing at higher strike), not a naked short call
+
+**Close targets: per-contract GTC price (TradeDetail)**
+- CLOSE TARGETS section now shows `GTC $X.XX/contract` as primary, with total dollars as secondary
+- Traders enter GTC orders at the broker using per-contract debit price, not total P&L
+
+**Delta/theta/vega chips: consistent units when live Greeks unavailable (TradeDetail)**
+- When `liveGreeks` is null, chips now scale stored per-share values: `t.delta × qty × 100`
+- Previously showed raw per-share value (e.g. `−0.30`) instead of contract-level value (e.g. `−150`)
+- T/V ratio numerator/denominator also normalized consistently
+
+---
+
 ## [3.4.0] — 2026-05-15
 
 ### Added
