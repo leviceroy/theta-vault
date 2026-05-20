@@ -5,6 +5,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [3.11.0] — 2026-05-20
+
+### Added
+
+**Structured post-mortem at close (#182)**
+
+Closes the learning loop opened by the entry thesis (#181). After recording a trade's exit, an optional collapsible "POST-MORTEM" section lets you score your process and capture the lesson while it's fresh.
+
+- **Entry Quality** (1–5): Was your entry timing, IVR environment, and strike selection appropriate?
+- **Management Quality** (1–5): Did you follow your management plan?
+- **Sizing Quality** (1–5): Was the position sized correctly for the setup?
+- **Lesson** (text): One sentence — what would you do differently?
+- **Thesis Outcome** (select): Thesis correct + won ✅ / Thesis correct + lost 😤 / Thesis wrong + won 😬 / Thesis wrong + lost ❌
+
+**UI design:** Collapsed by default in the close form — click "▶ POST-MORTEM (optional)" to expand. Score buttons are colored (green=4–5, yellow=3, red=1–2). All fields optional; saving without them works normally.
+
+**TradeDetail HISTORY tab** shows a POST-MORTEM block with dot-scale score display (●●●○○), thesis outcome label, and lesson text.
+
+**DB:** 5 new columns added via idempotent migration: `entry_quality_score`, `management_quality_score`, `sizing_quality_score`, `lesson_text`, `thesis_outcome`.
+
+---
+
 ## [3.10.1] — 2026-05-20
 
 ### Fixed
