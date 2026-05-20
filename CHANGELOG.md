@@ -5,6 +5,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [3.10.1] — 2026-05-20
+
+### Fixed
+
+**Import: same-day open+close pairs now match correctly (#197)**
+
+When a 0DTE trade is opened and closed within the same account statement, the importer was creating two separate trades (both marked as expired worthless) instead of one closed trade with the correct P&L. Root cause: the Account Trade History is in reverse chronological order, so the 19:45 close was processed before the 17:40 open existed in the pending trades list.
+
+Two fixes applied to `scripts/import.py`:
+
+1. **Chronological sort**: groups are now sorted by exec_time before processing, so opens always precede their same-session closes regardless of CSV order.
+
+2. **Pending-batch close fallback** (`_match_close_to_pending_batch`): when a close fails to match a DB trade, it now also searches the new trades created in the same import batch. If found, the close is applied in-place: `exitTime`, `exitReason`, `pnl`, and leg `closePremium` values are all set correctly before the trade is inserted.
+
+Manual DB correction also applied: trade ID 1720 (SPX 7320/7310 PUT, 5/19/26) was updated from `pnl=$142.56 / reason=expired` to `pnl=$0.12 / reason=closed` with correct leg close premiums.
+
+---
+
 ## [3.10.0] — 2026-05-20
 
 ### Added
