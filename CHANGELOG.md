@@ -5,6 +5,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [3.12.0] — 2026-05-20
+
+### Added
+
+**Full-text search across notes, thesis, and tags (#186)**
+
+Press `g` in the Journal tab to open a "search notes, thesis, tags…" input. The search runs instantly across five text fields on every trade: `notes`, `entry_thesis`, `tags`, `grade_notes`, and `lesson_text`. Case-insensitive substring match.
+
+- Works alongside the existing ticker filter (`f`) and condition filter builder — all three stack as AND logic
+- Active query shown as `notes: <query>` in the header (cyan); cleared with Escape
+- Keyboard shortcut added to status bar hint and Admin keyboard reference
+- No DB query — filters the already-loaded trades array in-memory (fast for any realistic journal size)
+
+---
+
 ## [3.11.0] — 2026-05-20
 
 ### Added
