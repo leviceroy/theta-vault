@@ -5,6 +5,604 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [3.18.0] — 2026-08-05
+
+### Fixed
+
+- **The importer's butterfly BPR regressed to the full wing span (#280).** Between 2026-05-06 and 2026-05-12 `compute_bpr` began reading a broken-wing butterfly's risk as `K_hi − K_lo` instead of the difference between the wings. Trade 1756 stored **$3,900** of buying power reduction against a true max loss of **$900**. Five trades were affected, carrying $7,400 of phantom BPR into ROC, AROC, heat, BPR% and every sizing check that touched them. The regression window was identified by the corrected rule reproducing 16/16 stored values written before it and disagreeing with exactly the 5 written after.
+- **`calculateBpr` disagreed with the importer on every defined-risk structure (#281).** Hand-entered trades sat on a different BPR basis than imported ones: the credit was never subtracted (trade 1225 read 1000 where the broker took 922), and a butterfly body ratio was read as lot size (trade 1434 read 10,000 against a true 2,150).
+- **`long_call_butterfly` was missing from `StrategyType` (#282).** Trade 1673 fell back to `custom`, which classified a $235-max-loss debit fly as undefined-risk, gave it no guide, rendered its max profit as a negative number, and left its BPR NULL. Added alongside `long_put_butterfly`.
+
+### Changed
+
+- **Max loss is now read off the payoff at its vertices instead of asserted per shape.** `boundedMaxLoss` (TypeScript) and `bounded_max_loss` (Python) evaluate `V(S) = Σ (short ? +1 : −1) × intrinsic × qty` at `{0, every strike}` and return `max(V) − net premium`. The expiry payoff is piecewise linear with kinks only at strikes, so the maximum is attained at a vertex and the probe is exact — no sweep resolution, no dependence on strategy label, leg order, wing symmetry or body ratio. Verticals, condors, butterflies, ratio flies and diagonals now fall out of one function instead of five hand-derived shapes.
+- A tails-only derivation was implemented first and rejected on review: correct for the 1-2-1 butterfly it was fit to, wrong for reverse flies (the payoff maximum sits at the body, not a tail), for 2-3-1 wing imbalance (the tail is leg-weighted), and for 1-3-1 bodies (which carry naked shorts and are not defined-risk at all). All three are now fixtures.
+- `boundedMaxLoss` returns null rather than 0 when risk is unbounded above the top strike or when the derived max loss is non-positive. A non-positive max loss means a guaranteed profit at entry, which in this book has always signalled a data defect, and a zero would be indistinguishable from "unknown" at every call site that tests `!bpr`.
+
+### Added
+
+- 12 BPR fixtures in `test_payoff_regressions.ts` (45 assertions total) and 12 in `test_pnl_regressions.py` (25 total). Every value is either the number the broker actually took, read from `trades.db`, or hand-derived from the expiry payoff where the stored value is known wrong.
+- `scripts/fix_bwb_bpr.ts` — the one-shot repair. It imports `boundedMaxLoss` rather than restating the formula, since a second copy of the rule is what caused the bug. Corrected 5 rows and backfilled 9 that were NULL; all 14 are closed trades, so open-position sizing was unaffected ($90,829 before and after).
+
+---
+
+## [3.17.0] — 2026-08-04
+
+### Changed
+
+- **`calculateP50` rewritten as a moving-boundary lattice (#279).** The old implementation returned `1 − P(underlying ever touches strike ∓ ½credit)` — a "probability of never being tested" metric containing no time-decay term at all. Since decay is the entire mechanism by which a premium seller reaches 50%, it read roughly 8x low: an ATM 45-DTE cash-secured put at 25% IV returned **9.31%** where tastytrade shows 70–85%. It now returns **77.7%**.
+
+  Reaching 50% is a first-passage problem against a boundary that *moves*. The target is hit when `P&L(S, τ) = netPremium − V(S, τ) ≥ target`, and because the structure value `V` depends on remaining time as well as spot, the boundary starts unreachable at entry and falls toward its intrinsic level at expiry — that same ATM put decays to half its credit with the underlying *unchanged* at roughly 3.6 DTE. Freezing the boundary at any single level reproduces the original error: a frozen barrier that has fallen below spot reports as already touched while the position still holds the full credit.
+
+  The engine now propagates probability mass over a 64-step recombining CRR lattice and absorbs it the first time a node's P&L reaches the target. Closed-form Black-Scholes at every node, deterministic, and structure-agnostic — **one engine replaced nine hand-derived per-strategy formulas**, each of which had been an independent chance to be wrong. The iron-condor branch in particular used to multiply two first-passage probabilities as though the touch events were independent, when they are one path.
+
+- **The 50% target now depends on the sign of the opening cashflow.** Net-credit structures target half the *credit*; net-debit structures target half the *max profit* read off the expiry payoff. For naked shorts, strangles and credit verticals max profit **is** the credit, so the two coincide and the ambiguity never surfaces. Credit butterflies, ratio spreads and lizards are where they diverge violently: trade 1434 collects **3.50** against a **28.50** theoretical max, so half-of-max would target 14.25 — a pin on the body — and print single digits for a trade that gets closed at half credit routinely. Put-BWB cohort average moves **5.9 → 82.0** across 18 trades; debit butterflies are unchanged at 15.1.
+
+- **Coverage went from 12 to 455 of 459 trades.** The old switch fell through to `return null` for every strategy it did not name — long verticals, ZEBRAs, long options, `custom`, and `long_call_butterfly` (which is missing from `StrategyType`, still open). Reading the structure off the legs instead of the strategy label removes that whole class of gap. Cohort averages shift as expected: cash-secured put 46.5 → 85.0, short put vertical 46.4 → 79.0, covered call 49.8 → 88.0, iron condor 19.1 → 53.9.
+
+- **Two trades now return `null` where they previously returned the 5.0 clamp floor.** Trades 1531 and 1540 (GLD) are *inverted* iron condors — the short call sits below the short put — collected for 4.86 and 4.54 against guaranteed minimum liabilities of 5.00 and 7.00. Max profit is negative, so there is no 50% of it to reach. Worth a look: those are locked-in losses at entry.
+
+- **Multi-expiration structures return `null` explicitly.** Calendars, diagonals and PMCCs are out of model — this engine prices every leg to one expiry, so a back-month leg would be valued at intrinsic on the front month's expiration and the structure would collapse to a fake guaranteed loss. They returned `null` under the old implementation too, so nothing regresses; the difference is that the refusal is now deliberate and documented rather than incidental.
+
+  Known biases, all in the conservative direction and left uncorrected rather than papered over with a fudge factor: discrete monitoring at 64 steps (Broadie-Glasserman-Kou boundary shift of `0.5826·σ·√dt`, ~1–4pp low); risk-neutral drift, which earns none of the real-world drift or vol risk premium a premium seller actually collects; and a single flat IV with no skew or term structure.
+
+- Removed the now-unused local `normalPdf` and `bsD1` duplicates from `payoff.ts`. `greeks.ts` remains the single Black-Scholes implementation — a second copy is how the breakeven defect in #273 survived.
+
+### Added
+
+- 16 new `calculateP50` assertions in `scripts/fixtures/test_payoff_regressions.ts` (suite now 33). Credits in the synthetic cases are priced with `bsOptionPrice` at the same IV the assertion uses, so each position is internally consistent. Covers the tastytrade band, moneyness/duration/volatility ordering, the condor-vs-its-own-put-side relation, the credit-vs-debit target rule pinned against both real DB butterflies, all five refusal paths, and a 459-call performance budget (currently 208ms).
+
+---
+
+## [3.16.0] — 2026-08-04
+
+### Fixed
+
+**Six calculation- and display-layer defects found by a full-application audit (#273–#278).** The Black-Scholes core in `src/calculations/greeks.ts` was verified correct — every defect below lived in how those primitives were called, what fell back when data was missing, and how results were rendered. The TypeScript calculation layer previously had **zero** test coverage; `scripts/fixtures/test_payoff_regressions.ts` now guards it with 17 assertions anchored to real `trades.db` rows.
+
+- **#273 — analytical breakevens dropped leg quantity.** `calculateBreakevensForJournal` summed leg premiums with no quantity factor, defended by a stale "matches rust — NO qty factor" comment. But `leg.quantity` is a per-unit **ratio** for butterfly bodies and ZEBRA long pairs (a 1-lot fly stores `[1,2,1]`) while it is an **absolute** contract count for verticals, condors and CSPs (a 6-lot stores `[6]`). Verified against the book: put_butterfly 1494 read a 14.65 debit instead of 3.00 (breakevens 6114.65/6285.35 instead of 6103/6297), and put_broken_wing_butterfly 1434 read a −91.86 credit instead of +3.50, placing its breakeven at 6141.86 instead of 6046.50 — 95 points off and on the *wrong side of the short strike*. Fixed by normalizing every leg quantity against the structure's minimum, which resolves both storage conventions to the same per-unit ratio. `czbr`/`pzbr` `numLong` and `ratio_spread` `nShort` are normalized identically so multi-lot structures stay lot-size invariant.
+
+- **#274 — Expected Value fabricated upside when max loss was unknown.** `TradeDetail` fell back to `maxLoss = Math.abs(t.cached_max_loss ?? t.bpr ?? 0)`. `cached_max_loss` is populated on 14 of 459 trades and `bpr` is NULL on every symmetric butterfly, so `maxLoss` silently became `0` and EV degenerated to `POP × maxProfit` — trade 1494 displayed **EV +$9,178** on a butterfly whose real risk is $300. BPR is collateral, not max loss; for a cash-secured put the two differ by exactly the credit. `maxProfit`/`maxLoss` are now `number | null`, derived from the spread width for defined-risk structures and the payoff sweep for butterflies, and `null` otherwise so the UI renders "—" (or "undefined" for undefined-risk max loss). `calculateExpectedValue` now rejects `maxProfit <= 0` and `maxLoss <= 0`. The butterfly fallbacks also no longer multiply by trade quantity a second time (the payoff sweep already scales by `leg.quantity`), which was reading 9× on a 3-lot fly, and they now use the contract multiplier instead of a hardcoded 100.
+
+- **#275 — max P/L and numerical breakevens ignored the calendar back-month adjustment.** `calculateMaxProfit`, `calculateMaxLoss` and `calculateBreakevens` hardcoded `strategy`, `frontMonthDte` and `iv` to `undefined` when calling `calculatePayoffCurve`, whose back-month Black-Scholes block is gated on `strategy != null`. The entire adjustment was therefore dead code for max P/L: every calendar, diagonal, PMCC and double-diagonal — 48 trades in the book — had its maximum computed as if the long back-month leg expired worthless alongside the front month. The three arguments are now optional parameters threaded through to the curve. `payoff.worker.ts` received them and dropped them; it now forwards them, along with the contract multiplier it had no field for at all (every futures payoff chart was off by the multiplier ratio).
+
+- **#276 — Avg ROC rendered 100× too small on the Dashboard.** `PortfolioStats.avg_roc` is a ratio. `OverviewTab`, `AnalyticsTab` and `PerformanceCharts` all multiply by 100; `DashboardTab:1424` (Risk Distribution) and `:1552` (strategy breakdown) did not. A 12% average ROC rendered as "0.1%" on one tab and "12.0%" on the next.
+
+- **#277 — net theta could not report its own sign.** `Math.abs()` plus a hardcoded "+" and hardcoded green at five sites (`DashboardTab:189, :721, :1573`; `OverviewTab:484, :500`) meant a net-long-premium book — negative theta, bleeding daily — displayed as positive green income. Also fixed `OverviewTab:504`, where the Avg POP colour threshold compared a 0–1 fraction against 70/60 and so was permanently red even at 95% POP, two lines from a display expression that scaled correctly.
+
+- **#278 — per-leg Greeks double-applied the short sign and mixed units.** The `TradeDetail` per-leg block applied `const sign = isShort ? -1 : 1` to values `estimateLegGreeks` had **already** signed, inverting delta on every short leg and contradicting the correct aggregate two blocks above. The same row rendered three different scales (delta per-share, theta in contract dollars, vega per-share) with `Math.abs()` hiding the sign on theta and vega. Now displayed verbatim from `estimateGreeks` — signed, in position dollars, with unit suffixes — so the per-leg rows sum exactly to the aggregate GREEKS block.
+
+### Added
+
+- `scripts/fixtures/test_payoff_regressions.ts` — first regression suite for the TypeScript calculation layer. 17 assertions covering butterfly and BWB breakevens against real trades 1494 and 1434, lot-size invariance for ratio structures, the absolute-quantity vertical convention, ZEBRA ratio division, and the EV null guards. Run with `bun scripts/fixtures/test_payoff_regressions.ts`.
+
+Verified: `bun scripts/fixtures/test_payoff_regressions.ts` 17/17 pass · `python3 scripts/fixtures/test_pnl_regressions.py` 13/13 pass · `bunx tsc --noEmit` clean · `bun run build` succeeds.
+
+---
+
+## [3.15.42] — 2026-08-01
+
+### Fixed
+
+**Three special-path P&L mis-bookings in the importer (#269, #270, #271)** — each previously required a hand repair after daily reconciliation; all now book to the broker's realized figure and are guarded by regression fixtures in `scripts/fixtures/test_pnl_regressions.py`.
+
+- **#271 — roll-close used stale `credit_received`.** A rolled single short put mislabeled as a `put_calendar_spread` carries a net roll value in `credit_received`, not the leg's own open premium, so `(credit_received − debit_paid)×100` detonated the P&L (RKLB 1780 booked −2924 vs true −1569). `compute_pnl_and_debit` now derives the open credit from the leg premiums and uses it whenever it disagrees with the stored `credit_received` by more than a cent; correctly-structured trades (where they agree) are unchanged.
+
+- **#270 — expired trades kept their open-time round-trip commission.** Expiry incurs no closing commission, but the stored `commission` is a round-trip estimate, over-subtracting ~$1.32/vertical (AAPL 1787 booked 169.35 vs broker 170.67). `auto_close_expired_legs` now strips the closing half when the stored commission is round-trip-shaped (per-contract > $1.00); an already-open-only commission is left untouched. (~1¢ rounding residual vs broker.)
+
+- **#269 — cash-settled index ITM expiry booked as worthless.** SPX/XSP/NDX/RUT settle ITM via blank-amount `EXP … exercise` rows, so the worthless default (closePremium=0) could be wildly wrong (SPX 1756 booked +94.84 vs true −333.53). The importer now never books a cash-settled index expiry worthless: it reconciles the realized P&L from the statement's authoritative P/L-YTD delta (`pl_ytd − pl_open − DB_realized(excl. this trade)`) when it is cleanly attributable — a P/L row exists, exactly one index trade for the ticker is in the sweep, and the result sits inside the leg-based risk envelope — and otherwise WARNs and leaves the trade OPEN for manual settlement. It never silently books a number it cannot stand behind.
+
+Verified: `scripts/fixtures/test_pnl_regressions.py` — 13 assertions, all pass (RKLB −1569.00, correctly-structured IC unchanged, AAPL open-only commission, SPX −333.53, and all three #269 leave-OPEN guards). `py_compile` clean.
+
+---
+
+## [3.15.41] — 2026-08-01
+
+### Fixed
+
+**Import History no longer mis-attributes expiry/ITM closes (#272)** — the Import History panel's "amount" is computed as `SUM(trades.pnl) WHERE import_session_id = session.id`. Inserted and updated trades (including standard orphan-close and roll/assignment closes) flow through `insert_trades` and are stamped with the current session via `id_map`. But `auto_close_expired_legs` books expiry and index-ITM closes with a direct `UPDATE` that never enters `id_map`, so those closes kept the trade's *opening* `import_session_id` — crediting realized P&L to the wrong (earlier) import. Symptom: the settling day showed $0.00 while an old session's amount was inflated.
+
+Fix: `auto_close_expired_legs` now returns the list of trade ids it closed; the session-linking step unions those ids with `id_map` before stamping `import_session_id` and computing the session's `total_pnl`. Additionally, the stored `import_sessions.total_pnl` is now recomputed for **all** sessions at the end of every import to match the live figure the UI shows, self-healing any staleness left by a post-import manual pnl repair.
+
+Verified: `auto_close_expired_legs` return type is a list; the linking block unions `expired_ids`; a synthetic expiry-close import stamps the current session id and the panel total equals the live `SUM(pnl)` recompute. Data cleanup for the 7 historically mis-attributed trades was applied 2026-07-31 (commit `8b13c14`); this release stops the recurrence at the source.
+
+---
+
+## [3.15.40] — 2026-07-18
+
+### Fixed
+
+**Startup no longer flashes on first launch (macOS TCC / Documents permission)** — the app's database lived at `~/Documents/Projects/theta-vault/trades.db`. macOS gates `~/Documents` behind a TCC consent prompt, so the first cold launch of any given build showed "Theta Vault would like to access files in your Documents folder"; until it was granted the SQL plugin could not open the DB, and the splash/main windows flashed repeatedly during the blocked state. Granting the prompt persists, which is why quitting and relaunching loaded cleanly — and why freshly-built versions (which re-trigger the prompt) flashed "most of the time".
+
+Fix: the project now lives at `~/Projects/theta-vault`, outside every TCC-protected folder, so the prompt never fires. `resolve_db_url` is unchanged in logic (still the single `trades.db` next to `src-tauri/`) — it simply resolves to the new, unprotected location; a comment now warns against moving the project back under `~/Documents`. The Python importer shares the same file at the same relative path.
+
+Verified: cold launch of the release build from the new location (WebKit caches cleared to force a true first-run) shows no permission prompt, no flashing, and the Dashboard loads directly.
+
+---
+
+## [3.15.39] — 2026-07-17
+
+### Fixed
+
+**Rolling both sides of a condor in one statement no longer half-closes the trade (#259)** — each VERT/CONDOR ROLL order built its close-update from the stale DB legs snapshot; with two rolls on the same trade in one batch, the apply loop (which has no same-id coalescing) let the second UPDATE clobber the first, leaving the parent half-closed with phantom legs. This was the oldest open importer bug.
+
+New `_merge_or_build_close_update()` routes every close-update through one door: if the batch already holds an update for that trade, the builder is re-run seeded with the *pending* update's legs (all key-map / all-closed / exec-time logic reused, none duplicated) and the result merges in place — commissions and fees sum across orders, the original fingerprint is kept, and nothing is appended twice. Wired into the VERT ROLL, CONDOR ROLL, and orphan-close sites; the assignment path (3.15.37/38) already guarded.
+
+Verified reproduce-first on a synthetic double-rolled SPY condor: pre-patch shows the documented clobber (call legs null, 2 phantoms); post-patch the parent closes fully at the hand-computed −$150.00 with exit at the second roll's time, both new verticals open at absolute credits, 4/4 reconciled, re-run idempotent. Regressions (IBM assignment e2e, 7/16 replay, live-copy idempotency) byte-identical to 3.15.38.
+
+---
+
+## [3.15.38] — 2026-07-17
+
+### Fixed
+
+**Hardening of the #261 assignment-close path (Forge audit findings)** — (F1) the fresh path could emit a second update dict for a trade that already had one pending (e.g. an expiry close for another leg of the same trade); the apply loop has no same-id coalescing, so the second UPDATE would clobber the first. The merge scan now also covers updates produced by the assignment pass itself, and the fresh path refuses to append when ANY update for that trade id is pending — printing a loud review-manually warning instead (covers the case where expiry processing already closed the assigned leg at 0.0). (F2) exp-close updates now carry `_close_exec_time`, and the merge falls back to the update's `exitTime`, so a morning assignment can no longer win `max()` against a later same-day settlement by default. (F3) documented that the strict leg match is the guard against a fee-contaminated strike derivation (fails safe with a warning).
+
+Verified: full re-run of the 3.15.37 test matrix (IBM e2e byte-identical −507.81, 7/16 regression unchanged, idempotency 0/0) plus new unit probes for the F1 guard (pending non-open leg → 0 emissions + WARN) and the F2 fallback (16:00 settlement beats 10:00 assignment).
+
+---
+
+## [3.15.37] — 2026-07-17
+
+### Fixed
+
+**Share-assignment EXP rows now close the assigned leg on the parent trade (#261)** — assignment rows (`BOT/SLD N.0 TICKER UPON …`) carry a share quantity and no strike/CALL/PUT text, so the option-expiry parser skipped them and the assigned short leg stayed phantom-open. Required manual repair on consecutive imports (GLD 1747 on 7/16, IBM 1794 on 7/17).
+
+New `_build_tos_assignment_closes()` runs after ATH and expiry processing: recovers the strike as |Amount| / shares (assignment settles at strike; BOT shares = short put assigned, SLD = short call), finds the open leg, and prices it by anchor priority encoding the manual-repair convention: (a) a same-type same-expiry leg closed within 5 days → paired price ± strike width (deep-ITM legs carry no extrinsic, so the spread books at its true width); (b) a same-statement share-disposal row → strike vs disposal price; (c) no anchor → **loud warning, leg left open** — never a silently wrong price. Assignment metadata (`was_assigned`, `assigned_shares`, `cost_basis` = strike) is persisted via the update path; `exit_reason` = `assigned`; exit time is the later of the paired close and the assignment event.
+
+Verified: replaying the 7/17 statement against the pre-import DB closes IBM 1794 end-to-end byte-identical to the manual repair (pnl −$507.81, assigned leg 84.55 via paired-leg anchor, was_assigned/100/290); the 7/16 replay is behavior-identical to 3.15.36 with no false trigger from the GLD share-sale row; unit probes cover the disposal anchor (exact) and the no-anchor warn path; live-copy re-run idempotent (0/0, 23/23). Known noise: re-importing a statement whose assignment was already applied prints two benign WARNs (trade already closed).
+
+Not covered (filed separately): assignments that occur in a statement gap with no EXP row in any imported file (the GLD 1747 shape) — needs position-delta inference.
+
+---
+
+## [3.15.36] — 2026-07-16
+
+### Fixed
+
+**A multi-leg close order spanning split trades now closes ALL of them (#266)** — when an earlier roll split a position into two DB trades (iron condor → call vertical + put vertical), a later single closing order covering all legs matched only the first strike-intersecting trade; `_build_tos_close_update` silently dropped the sibling's fills, leaving it phantom-open. Hit twice in production: JPM 1777/1778 (7/2) and AMZN 1789/1790 (7/16), both requiring manual DB repair.
+
+The orphan-close block now matches iteratively: a new `_split_close_fills_for_trade()` gives each matched trade only the close fills corresponding to its own legs (keys mirror the builder's `(strike, opt_type, expiry-month)` map with `(strike, opt_type)` fallback, so single-trade closes behave exactly as before); the remainder tries the remaining open trades. Full order commission goes to the first matched trade, matching the house-style manual repairs. A partial-unmatched remainder now prints a WARN instead of vanishing.
+
+Verified: e2e replay of the pre-import DB (631904b) against the 7/16 statement closes BOTH AMZN trades at exactly the manually-repaired values (1789 +$106.36, 1790 −$49.00, legs 2.79/1.62); GLD single-trade close unchanged; idempotent re-run on the repaired DB: 0 added / 0 updated / 25 of 25 legs matched / 0 phantoms. Cross-audit (Forge): PASS — split set proven a strict superset of the builder's close set, loop bounded three ways, fingerprints per-trade distinct, and the fallback restructure recovers an intraday-match path old code denied.
+
+Watch item (not fixed here): the VERT-ROLL path shares `_match_tos_close_to_db` and has the same latent shape if a roll's close side ever spans split trades — tracked on #266.
+
+---
+
+## [3.15.35] — 2026-07-02
+
+### Fixed
+
+**Roll-opened trades no longer store the roll's net credit as the spread's credit (#265)** — when a trade was opened via `VERT ROLL` (or same-expiry CONDOR roll), the importer handed the Cash Balance amount — the NET credit of the entire roll (close + open combined, e.g. `@.07`) — to `_build_tos_new_trade` as the new trade's `credit_received`. Legs store absolute premiums, so when the rolled trade later closed at an absolute debit, `pnl = (roll_net − absolute_debit) × 100` produced large phantom losses. Three trades detonated on the 7/2 import: JPM short_call_vertical −$377.66 (true +$36.00), PLTR −$840.00 (true +$220.00), CRCL −$606.00 (true −$80.00).
+
+Fix is at the ingestion point: the roll-open call site now passes `None` for `cb_amount`, forcing the builder to derive the absolute credit from the open legs' premiums (short − long). The plain-open path is untouched — Cash Balance remains authoritative there (verified: MCD covered call still parses cr=+4.30).
+
+Also fixed in the same fallback branch: the leg-premium sum is now normalized by trade quantity, so a future multi-lot roll stores the per-unit credit (2-lot AAPL vertical → 1.72, not 3.44) — consistent with the per-unit convention `compute_pnl_and_debit` expects since 3.15.34.
+
+Data repair applied alongside: the three detonated trades corrected, JPM put-vertical phantom closed (+$17.00), and the six latent roll-opened trades' credits rebased to absolute (AAPL 1787→1.72 / 1788→0.98, AMZN 1789→1.29 / 1790→0.68, CRCL 1793→6.25, IBM 1794→4.93). Verified: scratch-DB re-import parses CRCL cr=+6.25 / IBM cr=+4.93; live re-run idempotent (0 added / 0 updated); 29/29 open legs reconcile; JPM and CRCL statement-YTD gaps collapsed to fees-level.
+
+---
+
+## [3.15.34] — 2026-06-30
+
+### Fixed
+
+**P&L no longer double-counts quantity on multi-contract trades (#260)** — `compute_pnl_and_debit` accumulated the close credit by multiplying each leg's close premium by the leg's absolute quantity, and then the final P&L line multiplied the whole sum by the trade quantity again — squaring the contract count (qty²) for any strategy that stores leg quantity as an absolute count (covered_call, cash_secured_put, multi-contract verticals/condors). A 6-lot covered call rolled for a small per-share gain was reported as −$2,889.97 instead of +$440.03.
+
+Root cause: `leg.quantity` is stored as the ABSOLUTE contract count for most strategies (a 6-lot covered call stores leg `[6]`), but as a per-trade-unit RATIO for butterfly center legs (a 1-lot butterfly stores `[1,2,1]`). The close-credit loop treated the absolute count as a ratio. The fix normalizes each leg to its per-trade-unit ratio (`leg_qty / trade_qty`) before accumulating, so the final `× trade_qty` produces the correct absolute contract count for every strategy: a covered call's 6/6 = 1, a butterfly center's 2/1 = 2.
+
+Verified against four cases: T covered-call 6-lot (+$440.03), NVDA put-vertical 2-lot (+$51.40), SPY iron condor 1-lot (+$69.35, unchanged), and a 1-lot butterfly with a 2× center leg (ratio weighting preserved).
+
+Note: this patch fixes P&L computed on future imports. Historical closed trades that already stored a double-counted P&L require a one-time recompute sweep (tracked separately).
+
+---
+
+## [3.15.33] — 2026-06-26
+
+### Fixed
+
+**CONDOR ROLL wing-merge is now idempotent** — when re-running an account-statement import that contains a CONDOR ROLL (one side of an iron condor rolled to new strikes), the importer no longer overwrites the parent IC's closed-wing legs with the new strikes. Previously, re-running destroyed the partial-close state by dropping the closed call (or put) legs from the parent IC and replacing them with the new strikes, while ALSO keeping the separately-created new-side trade — producing duplicate call legs across two trades and breaking reconciliation with QTY MISMATCH errors.
+
+The fix adds a re-entrancy guard to `_find_partial_ic_for_wing_merge`: before returning a partial IC as a wing-merge target, the function now checks whether ANY other open trade in `db_open_trades` already holds OPEN legs at the same strikes / expiration / option type as the new fills. If so, the wing merge has already been processed on a prior run, and the function returns None to prevent destructive overwrite.
+
+Concrete example: 6/26 statement had AMZN 280/285 → 260/265 and AAPL 310/315 → 300/305 call rolls. On the first import these correctly partial-closed 1758/1772 and created 1781/1782 as new short call verticals. Re-running used to destroy 1758/1772 by dropping the closed 280/285 and 310/315 legs and reusing the new strikes; now the guard sees 1781/1782 already hold those strikes and skips the merge.
+
+---
+
+## [3.15.32] — 2026-06-22
+
+### Fixed
+
+**Import early-return no longer skips post-processing** — when an account statement contains zero genuinely new trades (e.g. only re-reported prior closes), the importer previously printed "No new trades to import" and exited before running `auto_close_expired_legs`, `reconcile_open_positions`, the Account Summary print, or the P&L YTD cross-check. The result: 6/18-expired trades stayed marked `open` in the DB even though the 6/22 statement no longer listed their legs in the open Options table.
+
+The fix replaces the early-return with a `skip_trade_import` flag. The new-trade ingestion section (absorb intraday IC call rolls → Greeks enrichment → playbook assignment → `insert_trades` → roll-chain linking) only runs when there ARE new trades. Auto-expiry, reconciliation, account summary, and P&L cross-check ALWAYS run for ThinkOrSwim statements — they're independent of new-trade arrival and the user wants the statement reconciled regardless.
+
+**DB cleanup (2026-06-18 expirations):** Seven trades auto-closed by the post-fix re-import:
+
+- IWM 1767 (long_diagonal_spread) — worthless, P&L −$826.67
+- QQQ 1576 (iron_condor) — **manually adjusted to assignment**: short 675C assigned + long 685C exercised → net −$1,000 settlement + $465 credit = **−$535**, exit_reason='assigned' (auto-close had computed +$465 worthless)
+- SPX 1598 (put_broken_wing_butterfly) — worthless, P&L +$154.84
+- SPX 1700 (short_put_vertical) — worthless, P&L +$267.42
+- SPX 1714 (short_put_vertical) — worthless, P&L +$39.84
+- SPX 1715 (short_put_vertical) — worthless, P&L +$60.12
+- WMT 1768 (long_diagonal_spread) — worthless, P&L −$817.67
+
+After cleanup: 60/60 open option legs reconcile exactly with the 6/22 statement Options snapshot.
+
+---
+
+## [3.15.31] — 2026-06-18
+
+### Fixed
+
+**Import auto-expiry no longer fires on 0DTE legs still listed open on EOD statement** — when a same-day expiration trade is opened intraday (e.g. SPX 0DTE put vertical opened ~2pm ET, expires at the close), the broker EOD statement for that day still carries the legs in the open Options table because settlement processes overnight. The previous `auto_close_expired_legs` rule fired purely on `today > expirationDate` and zeroed both legs at $0, marking the trade closed. The next day's statement then showed the legs as MISSING FROM DB because the DB had auto-closed too early.
+
+The hardened rule now takes the statement's open positions snapshot as the authoritative settlement clock. `auto_close_expired_legs(conn, stmt_open_keys)` accepts a set of `(ticker, strike, expiry_iso, OPT_TYPE)` tuples drawn from the statement's Options + Futures Options tables. If ANY of a candidate trade's null-premium legs is still in that set, the trade is skipped — the broker hasn't settled it yet. Only when the NEXT statement omits the leg does auto-close trigger, which is the correct behavior.
+
+The DB-state fix: trade ID 1776 (SPX 7470/7465 PUT vertical, 2026-06-17) was reopened — `closePremium` reset to NULL on both legs, `status='open'`, `pnl/exit_date/exit_reason` cleared. Next 2026-06-18 statement import will see the legs absent from the Options snapshot and auto-close it cleanly with `exit_reason='expired'` and the proper credit-only P&L.
+
+---
+
+## [3.15.30] — 2026-06-04
+
+### Added
+
+**Portfolio Backtest sub-tab (#254)** — new Performance → Backtest view for combined weighted cumulative P&L across selected strategies.
+
+- 4 KPI cards (TOTAL P&L, WIN RATE, TOTAL TRADES, RETURN ON CAPITAL) computed from the weighted subset; win rate and trade count stay unweighted since weight is a sizing knob, not duplication.
+- Contract Size Weighting panel with one row per selected strategy: colored dot (from shared `STRATEGY_COLORS` palette), strategy label, defined-risk badge (DR/UR — tastytrade convention), and −/value/+ stepper clamped to [0, 5] in 0.5 increments.
+- Combined Cumulative P&L Recharts AreaChart; curve coloring switches between `--green` and `--red` based on final P&L sign.
+- Default top-6 selection: pinned set (`put_broken_wing_butterfly`, `iron_condor`, `short_put_vertical`, `cash_secured_put`, `long_diagonal_spread`, `short_diagonal_spread`) for any strategy with ≥1 closed trade, slack filled by highest-volume non-pinned strategies.
+- Live recalculation: chart and KPIs update on every weight change; Recalculate button briefly flashes green as visual feedback. Reset to 1× restores baseline.
+- Data aggregation in pure `backtestMath.ts` (group closed trades by `(strategy, exit_date day)`, per-strategy running cumsum, union-axis forward-fill combine).
+
+**Strategy color extraction** — `STRATEGY_COLORS` map moved from inline `ChartsTab.tsx` into shared `src/lib/strategyColors.ts` with `stratColor()` helper. Added entries for `put_broken_wing_butterfly`, `call_broken_wing_butterfly`, `short_diagonal_spread`, `call_butterfly`, `long_call_butterfly`, `long_put_vertical`, `long_call_vertical`, `czbr`, `calendar_spread`, `custom`.
+
+### Fixed
+
+**Sign-inverted P&L on multi-contract orphan-close imports (#252)** — corrected ID 1603 SOFI cash_secured_put: `debit_paid` 2.34 → 0.78 (was double-counted as `closePremium × quantity` instead of per-share), `pnl` −343.99 → +124.01. Scope check across all 409 trades confirmed ID 1603 was the only affected row. Importer fix itself tracked in #252 — this changelog entry covers the data correction.
+
+**Misclassified diagonal-roll ticket (#253)** — corrected ID 1757 RKLB: `strategy` `short_diagonal_spread` → `cash_secured_put`, `rolled_from_id` set to 1744, `roll_count` = 1. The original DIAGONAL ticket was structurally a put-roll (TO CLOSE 17 JUL 105 + TO OPEN 21 AUG 95), so the resulting open position is a single short put, not a diagonal spread. Importer fix tracked in #253.
+
+### Imported
+
+- `scripts/2026-06-04-AccountStatement.csv` — 7 trades (SOFI long_call close, SOFI CSP close, AAPL SPV close, MSFT SPV close, RKLB CSP close, CRM SPV close, RKLB diagonal-roll open). All open-position legs reconciled 56/56 against statement.
+
+---
+
+## [3.15.28] — 2026-05-27
+
+### Fixed
+
+**Futures contract multiplier — BPR, MaxP, MaxL, ROC now correct for /CL, /NG, /ZC, /ES, etc.**
+
+Pre-3.15.28, all dollar-producing calc paths (`legPayoffAtPrice`, `calculateBpr`, `calculateRoc`, `calculatePnlFromLegs`, `calculateAnnualizedYield`, `calculateExtrinsicRemaining`, `estimateLegGreeks`) hardcoded the $100 equity multiplier. Futures options use different multipliers: /CL = $1000/pt, /NG = $10,000/pt, /ZC = $50/pt, /ES = $50/pt, etc. So /CL trades displayed BPR/MaxP/MaxL/ROC understated by 10×; /ZC was overstated 2×; /NG understated 100×. P&L itself was correct because the import script already applied the right multiplier when writing pnl.
+
+- **New helper**: `src/lib/contractMultiplier.ts` — `getContractMultiplier(ticker)` returns 100 for equities/ETFs/index options and the CME-spec multiplier for futures roots (24 supported, from `/ES` to `/6A`). `futuresRoot()` strips contract-month codes (`/CLN26` → `/CL`).
+- **Threaded through**: every dollar-producing function now takes an optional `multiplier` parameter (defaults to 100 for backward compatibility). Callers — TradeDetail, JournalTab, DashboardTab, PlaybookTab, OverviewTab, portfolio.ts aggregation — pass `getContractMultiplier(t.ticker)`.
+- **Data backfill**: `scripts/backfill-futures-bpr.py` rescales stored `bpr`, `cached_max_profit`, `cached_max_loss` for all 3 existing futures trades. Backup: `trades.db.bak_20260527_futures_multiplier`. Verified on /CL #1710: BPR $71 → $710, MaxP $29 → $290, ROC 63.3% → 6.33% (matches Schwab broker statement).
+
+### Known limitation
+
+Stored per-share Greeks (`trade.delta`, `trade.theta`, `trade.vega`, `trade.gamma`) for multi-contract trades imported under the post-2026-05-27 leg.quantity convention (where leg.quantity = trade.quantity) have trade.quantity baked into the stored value, causing downstream `× trade.quantity` consumers (DashboardTab BWD, portfolio.ts net Greeks) to double-count. Affects only multi-contract symmetric trades imported via the new convention; equity 1-contract trades are unaffected. Filed as follow-up — to be fixed by normalizing import script to always store per-1-contract Greeks regardless of leg.quantity.
+
+---
+
+## [3.15.27] — 2026-05-27
+
+### Fixed
+
+**Leg quantity convention — silent undercount bug class**
+
+`leg.quantity` is now the absolute per-leg total contract count, set on every leg of every trade. Previously, multi-contract trades imported pre-3.15.27 stored `leg.quantity` as `null`, causing the legs-path (BPR, payoff curve, BS Greeks from legs) to default to 1 and silently understate position size by `trade.quantity ×`. 146 legs across 32 closed multi-contract trades (and 1 open: T #1232 covered_call qty=6) were affected.
+
+- **Data migration**: `scripts/migrate-leg-quantity.py` walks `trades.db legs_json` and sets `leg.quantity = trade.quantity` wherever it was missing. Butterfly/BWB ratio legs (27 legs where `leg.quantity != trade.quantity`) are preserved as-is. Idempotent — re-runs are no-ops. Backup written to `trades.db.bak_20260527_leg_qty_migration` before migration.
+- **Write guard**: New `normalizeLegs(legs, tradeQty)` helper in `src/db/queries.ts` is applied at every leg write path — `insertTrade`, `updateTrade` (when `legs` provided), `closeTrade` — so new rows can never re-introduce the bug.
+- **Read guard**: `hydrateTrade()` also backfills `leg.quantity` from `row.quantity` if any pre-migration row sneaks through.
+
+Verification: open-position reconciliation against the broker statement still passes 77/77 leg match post-migration.
+
+---
+
+## [3.15.1] — 2026-05-20
+
+### Added
+
+**Journal — Annualized ROC column (AROC%)**
+
+New toggleable column in the Journal table: **AROC%** (Annualized Return on Capital). Formula: `ROC% × 365 ÷ entry DTE`. Shows what your actual ROC would be if annualized — the correct way to compare a 14-DTE iron condor at 8% ROC to a 45-DTE strangle at 12% ROC. Sortable, included in CSV export, tooltip explains the formula.
+
+**Models — big_lizard strategy**
+
+`big_lizard` is now a first-class strategy type with proper label, badge ("BL"), and metadata matching the jade_lizard profile. Previously, imported big_lizard trades silently degraded to "custom" strategy, breaking analytics and compliance checks.
+
+### Fixed
+
+**BPR — OTM-adjusted margin for strangles and naked positions**
+
+`calculateBpr()` now accepts an optional `underlyingPrice` parameter. When provided (from TradeForm's live spot field), uses the Reg T OTM-adjusted formula: `max(20% × underlying − OTM_amount + premium, 10% × underlying + premium)` instead of the conservative flat `20% × strike`. This gives accurate ROC% for wide strangles — previously understated by 15–25% for 5-delta strangles. Stored BPR for existing imported trades is unchanged (conservative is safe). TradeForm now passes underlying price to both the live preview and trade save paths.
+
+**Performance tab — live MTM unrealized P&L**
+
+The Performance → Overview tab now receives `livePortfolioStats` (with real BS mark-to-market unrealized P&L when live prices are available) instead of the static theta-proxy `portfolioStats`. The P&L line also shows "(est.)" for open positions with a hover tooltip explaining the estimation basis.
+
+---
+
+## [3.15.0] — 2026-05-20
+
+### Added
+
+**Analytics — P&L skewness (#169) and max drawdown duration (#170)**
+
+Two new metrics in Performance → Overview right panel:
+- **P&L Skewness** — measures the shape of your trade P&L distribution. Negative skewness is normal and expected for premium sellers (many small wins, occasional large losses). Very negative (< -2) may indicate unmanaged losers.
+- **DD Duration** — calendar days of the longest drawdown (time from equity peak to recovery). Complements Max DD % with the psychological dimension: 20% DD over 7 days vs. 90 days are completely different experiences. Green < 30d, yellow 30-90d, red > 90d.
+
+**Analytics — Theta capture by DTE bucket (section S, #172)**
+
+New section **S** in Analytics tab. Splits theta capture % into three buckets by DTE at close:
+- ≥21 DTE (managed per tastytrade rule)
+- 10–21 DTE
+- <10 DTE (held into final stretch)
+
+For each bucket: trade count, WR%, theta capture %, avg P&L. Answers empirically: "does the 21-DTE rule actually improve my theta capture?" Theta Capture = actual P&L ÷ theoretical θ-decay (√t model). 100% = kept full premium. >100% = direction/IV helped. Negative = position moved against you.
+
+### Changed
+
+**Alert simplification — removed gamma_risk, pin_risk, delta_extreme (#178)**
+
+Three alert kinds removed from the alert system:
+- `gamma_risk` — required stored gamma + ≤7 DTE trigger. Replaced with a plain `manage` alert: "at N DTE — final week, close or roll immediately."
+- `pin_risk` — required live spot within 0.5% of short strike at expiry. Belongs in TOS.
+- `delta_extreme` (portfolio) — required live beta-weighted delta calculation. Belongs in TOS.
+
+The 12 remaining alert kinds cover all the journal-relevant cases: defense (expires today, tested), max_loss, warning (earnings, calendar), dividend_approach, undefined_drift, drawdown, roll_chain, manage, close, roll, sizing, ok.
+
+**PayoffChart deprecation notice (#179)**
+
+Added a banner above the theoretical payoff chart: "Theoretical expiration payoff — uses stored entry prices, not current market structure. TOS/TastyTrade show this better in real-time. Roadmap: replace with realized P&L timeline."
+
+### Fixed / Polish
+
+**#174** — 21-DTE timeline marker in TradeDetail now has a tooltip explaining √t coordinate space: why the marker isn't at 50% of the bar, and what "theta-decay space" means.
+
+**#175** — IV normalization convention documented in `normalizeIv`/`normalizeIvFrac` in `src/lib/format.ts`. The `> 2` heuristic (decimal vs. percent stored IV) is now explained in a JSDoc contract comment.
+
+**#167, #173** — Already implemented in prior code. Closed: `~` stale Greek indicator was already rendered; ZEBRA strategy guides (czbr/pzbr) were already in StrategyGuidePanel.tsx.
+
+---
+
+## [3.14.0] — 2026-05-20
+
+### Added
+
+**Trade timeline (Gantt) view — GANTT button in Journal tab (#194)**
+
+Click **GANTT** in the Journal header to switch from the table to a horizontal Gantt-style timeline. Click again to return to the table. The detail panel on the right still works — click any bar to load that trade's detail.
+
+**What it shows:**
+- Each trade is a horizontal bar spanning its entry → exit date (open trades extend to today)
+- Tickers are grouped into rows — trades within the same ticker that overlap in time are packed into separate lanes automatically (greedy interval packing, no overlaps)
+- **Bar height ∝ BPR** — thicker bar = more capital allocated to that trade
+- **Color:** cyan = open, green = win (P&L > 0), red = loss
+- Strategy badge visible inside bars wide enough to show it
+- Month grid lines and a TODAY marker for orientation
+- Period filter: 3M / 6M / 1Y / All
+
+**What this reveals that the table never could:**
+- When you were over-allocated (many thick bars at the same time)
+- How your positions overlapped — did you pile into SPX while already heavy on AAPL?
+- Campaign visualization — rolling sequences on the same ticker
+- Sizing evolution over time — are your bars getting thicker or thinner?
+
+The timeline uses `allFiltered` (all filtered trades, not limited by the 200-trade closed cap) so you see the full picture.
+
+---
+
+## [3.13.9] — 2026-05-20
+
+### Fixed
+
+**Audit bug batch — #159–#166**
+
+Six calculation and display bugs from the Tom Sosnoff audit, plus two already-resolved issues closed:
+
+- **#161 — legPayoffAtPrice undefined for unknown leg types:** Added `default: return 0` to the switch statement. Previously, any unrecognized leg type (imported data with a typo, future leg types) produced `undefined`, propagating NaN through the entire payoff curve and corrupting breakevens, max profit/loss, P50, and PIT.
+
+- **#162 — bsD1 crash when spot ≤ 0:** Added `spot <= 0 || strike <= 0` guard alongside the existing `t <= 0 || sigma <= 0` guard. A stale price feed returning 0 caused `Math.log(0)` = -Infinity, silently poisoning all Greek calculations with NaN.
+
+- **#163 — DTE@Close quality % wrong when findIndex returns -1:** Replaced brittle `findIndex` searching for "21" in bucket label text with a direct edge-comparison filter: `dtecloseBuckets.filter((_, i) => dtecloseEdges[i] >= 21)`. If no label matched, `slice(-1)` returned only the last element, reporting ~0% close quality incorrectly.
+
+- **#164 — Profit Factor color thresholds inconsistent:** OverviewTab line 665 used `≥1.5 = green / ≥1.0 = yellow` while AnalyticsTab used `≥2.0 = green / ≥1.5 = yellow`. Now unified to `≥2.0 green / ≥1.5 yellow / <1.5 red` (tastytrade standard) in both tabs.
+
+- **#165 — CT timezone hardcoded as CST (UTC-6):** Replaced `const CT_OFFSET = 5` with `ctHourOf(d)` using `Intl.DateTimeFormat` with `timeZone: "America/Chicago"`. CDT (UTC-5, March–November) and CST (UTC-6, November–March) are now handled automatically. Previously 6 months/year had entry times misclassified by 1 hour, corrupting first-hour trading analysis.
+
+- **#166 — BE move % divides by zero:** Changed `spotForGreeks` truthiness check to explicit `spotForGreeks != null && spotForGreeks > 0` guard. Prevents the division from running when spot is undefined or zero.
+
+- **#159, #160 — already resolved:** Calmar yearSpan null guards and monthly P&L numeric sort were both already corrected in earlier code. Issues closed as fixed.
+
+---
+
+## [3.13.8] — 2026-05-20
+
+### Added
+
+**Calendar tab enhancements — seasonal patterns + per-month strategy breakdown (#196)**
+
+**Per-month strategy breakdown** (month view, below the day-of-week footer):
+
+When viewing any month, a new section shows every strategy used that month with count, win rate, avg P&L per trade, and total P&L. Sorted by trade count. Answers "what was I running in March?" at a glance.
+
+**Year-over-year comparison grid** (always visible below the 12-month trend bar):
+
+A heatmap table with years as rows and months (Jan–Dec) as columns. Each cell shows that month's total P&L colored by magnitude — green for profitable months, red for losses, intensity proportional to the amount. The TOTAL column shows the full year P&L.
+
+- Only appears when you have ≥ 2 years of closed trade data
+- Click any cell to jump directly to that month's calendar view
+- The currently selected month is outlined in accent color
+- Answers "is October consistently bad for me?" or "do I always make money in Q1?" across the full history
+
+---
+
+## [3.13.7] — 2026-05-20
+
+### Added
+
+**Quick close context menu — right-click any trade row (#195)**
+
+Right-click any trade row in the Journal tab to get a context menu. For open trades:
+
+- **⏳ Expire worthless** — closes the trade immediately with P&L = full credit received, exit date = expiration date, exit reason = expired. Shows a browser confirm with the exact P&L amount before executing. Bypasses the form entirely — the common Friday expiration routine is now two clicks.
+- **✕ Close (fill P&L)** — opens the close form pre-selected on this trade
+- **↻ Roll** — opens the Roll Advisor for this trade
+
+For all trades (open and closed):
+- **✎ Edit** — opens the edit form
+- **✕ Delete** — confirms then deletes
+
+Menu auto-dismisses on outside click. Clamped to window edges so it never renders off-screen.
+
+---
+
+## [3.13.6] — 2026-05-20
+
+### Added
+
+**Saved filter presets (#187)**
+
+The filter builder in the Journal tab now has a PRESETS bar above the condition rows.
+
+- **↓ save** button appears when at least one condition is active — click it, type a name, press Enter to save the current filter as a named preset
+- Saved presets appear as chips; click any chip to instantly restore that filter
+- **×** on each chip to delete it
+- Presets are stored in `localStorage` (survive app restarts, no server required)
+- Pressing Escape while naming dismisses the input without saving
+
+Example use: save "High IVR Iron Condors" (strategy = iron_condor + IVR > 50) as a one-click query to run whenever you want to review that slice of your journal.
+
+---
+
+## [3.13.5] — 2026-05-20
+
+### Added
+
+**Process quality analytics — section R in Analytics tab (#184)**
+
+Press `R` to open PROCESS QUALITY — powered by the post-mortem data captured at close (#182).
+
+**Thesis outcome matrix (2×2):** Every closed trade with a thesis outcome is placed in one of four cells:
+- ✅ Correct + Won — good process, good outcome (the goal)
+- 😤 Correct + Lost — good process, bad luck (penalized by variance)
+- 😬 Wrong + Won — bad process, good luck (dangerous — looks like skill, isn't)
+- ❌ Wrong + Lost — bad process, bad outcome (the one to minimize)
+
+Each cell shows: count, % of total, avg P&L. Header shows overall thesis accuracy rate.
+
+**Quality score impact (1–5 scale):** Three tables side-by-side — Entry Quality, Management Quality, Sizing Quality. For each score level (1=poor → 5=excellent): count, avg P&L, win rate. Reveals whether higher process scores actually correlate with better outcomes in your trading.
+
+Shows "no post-mortem data yet" when neither thesis outcomes nor quality scores have been recorded.
+
+---
+
+## [3.13.4] — 2026-05-20
+
+### Added
+
+**Tag taxonomy + multi-select picker (#183)**
+
+Replaces the free-text tags input in the trade entry/edit form with a structured multi-select tag picker.
+
+Five predefined categories — click any tag to toggle it on/off:
+- **Entry:** high_ivr, low_ivr, chased_entry, waited_for_setup, earnings_risk, tested_early
+- **Exit:** held_too_long, panic_exit, closed_at_target, early_exit, let_expire, managed_at_21
+- **Sizing:** oversized, undersized, max_allocation, appropriate_size
+- **Process:** followed_playbook, broke_rules, gut_trade, revenge_trade, best_execution
+- **Market:** trending_market, high_vix, low_vix, earnings_crush, vix_spike, sector_rotation
+
+Custom tags still supported — type in the custom field and press Enter or comma to add.
+
+Storage format is unchanged (comma-separated string), so existing imported tags are preserved and the full-text search (`g` key) continues to work across all tags. Predefined tags are now consistently named (underscore-separated), making them reliably queryable via the filter builder and full-text search.
+
+---
+
+## [3.13.3] — 2026-05-20
+
+### Added
+
+**Probability calibration — new section Q in Analytics tab (#192)**
+
+Press `Q` in the Analytics tab to open PROBABILITY CALIBRATION — a feature unique to Theta Vault among retail options journals.
+
+The question: are your probability estimates accurate? If your model says 70% probability, do 70% of those trades actually win?
+
+Two calibration tables side-by-side:
+
+- **POP calibration** — uses the stored POP value at entry, grouped into buckets: <50%, 50–60%, 60–70%, 70–80%, 80–90%, ≥90%. Shows expected win rate (avg POP in bucket) vs actual win rate, with error in percentage points
+- **P50 calibration** — computes P50 at entry from stored trade data (legs, IV, DTE, entry price) for each closed trade; same bucketing and comparison
+
+Each row shows: Bucket | N | Expected | Actual | Error (with visual bar) | Avg P&L
+
+Color logic: **green = actual exceeded model** (model is conservative — you outperform your own estimates); **red = actual below model** (model is overconfident — you win less than predicted). Perfect calibration = errors near 0.
+
+Requires ≥3 trades per bucket to display. Cells below threshold show a data-availability notice.
+
+---
+
+## [3.13.2] — 2026-05-20
+
+### Added
+
+**Management adherence analytics — new section P in Analytics tab (#191)**
+
+Press `P` in the Analytics tab to open the MANAGEMENT ADHERENCE section. Answers the question: "do I actually close trades when I say I will?"
+
+Three panels:
+
+- **DTE Management** (vs tastytrade 21-DTE standard): shows what % of your trades were managed at ≥21 DTE (green), held 5–21 DTE (yellow), or held to expiry (red), with avg P&L per bucket — shows whether early management pays off for you specifically
+- **Profit Target Adherence**: % closed at target vs held past it, with avg P&L for each group — quantifies whether sticking to your target rule matters
+- **Early Exits Warning**: flags trades closed pre-21 DTE without hitting their profit target (discipline failures)
+- **Avg DTE@Close by Strategy**: table showing each strategy's average exit DTE — green ≥21d ✓, yellow 10–21d, red <10d
+
+---
+
+## [3.13.1] — 2026-05-20
+
+### Added
+
+**IVR entry analysis — theta capture + best-band recommendation (#190)**
+
+Enhances the IV RANK AT ENTRY section in Analytics:
+
+- **Avg θ/day column:** Shows average entry theta (absolute value) per IVR bucket, so you can see which IV environments generate the most daily decay
+- **Best-band highlight:** The IVR bucket with the highest win rate (minimum 3 trades) is marked with ★ and a subtle green background
+- **Footer recommendation:** "★ best IVR range for you: 50-60 — 73.1% WR, avg +$142 per trade (11 trades)" — tells you exactly where your edge lives
+
+---
+
+## [3.13.0] — 2026-05-20
+
+### Added
+
+**Ticker analytics panel — sortable, full-stats breakdown (#189)**
+
+The TICKER BREAKDOWN section in Analytics tab is now a 9-column sortable table. Click any column header to sort; click again to reverse.
+
+- **New columns:** Avg DTE at entry, Avg IVR at entry, Avg ROC%, Sharpe (ROC-based, requires ≥ 2 trades)
+- **WR% coloring:** green if above portfolio average, red if below, yellow if equal — tells you at a glance where you have edge vs. where you give money back
+- **Statistical significance:** tickers with < 5 trades shown in muted color with `·` marker
+- Default sort: Total P&L descending (highest-contribution tickers first)
+
+**Learning curve metrics — rolling-50 win rate + quarter-over-quarter (#188)**
+
+Two additions to the Charts tab that answer "am I actually improving?"
+
+*Rolling-50 win rate:* The existing 20-trade rolling win rate line is now joined by a 50-trade rolling window (green line). The 50-trade line only appears once 50+ closed trades exist, providing a smoother signal. Both computed from full trade history (not period-filtered) so the learning curve spans the complete journal.
+
+*Quarter-over-quarter table:* Below the win rate chart, a compact grid shows the last 8 quarters side-by-side — Trades / WR% / Avg P&L / Total P&L per quarter. Respects the period filter. WR% colored green ≥ 60%, yellow ≥ 50%, red < 50%. Answers the question "which quarters were my best, and is the trend improving?"
+
+---
+
 ## [3.12.0] — 2026-05-20
 
 ### Added
