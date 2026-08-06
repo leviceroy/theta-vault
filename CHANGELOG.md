@@ -18,6 +18,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 ### Known
 - **The width-based GTC *price formula* is still questionable (#292, open).** `gtc = |credit| + width × pct` treats every width-rule structure as a debit fly bought to be sold. A credit put BWB whose tent peak carries intrinsic value does not close that way — trade 1765 collected 0.33 against a max profit of 5.33. Filed rather than redesigned; GTC order-entry pricing sits under the audit's "belongs in a trading platform" list.
 - On the 30 closed butterflies and BWBs where 25% of width is even attainable, **2 reached it.** That is real feedback about management, and it was invisible while the rule was stubbed.
+- **The rule can still be unreachable by construction on credit spreads (#293, open).** A 5-wide credit vertical taken for 1.50 has a max profit of $150 against a `width_50` target of $250 — permanently false. That is the same defect as #290 narrowed from the whole book to "credit structures where the credit is below `pct × width`". The playbook picker offers every rule against every strategy; it should gate on compatibility.
+- **The comparison is net-of-commission on the left and gross on the right.** Realized `pnl` is net of the closing commission; the target is derived from strike geometry. A fill exactly at the printed GTC therefore scores as a miss by roughly the commission. Always conservative, a few dollars, and deliberately left alone rather than papered over with an epsilon — but it means "I closed right at the target and it says I missed" is expected on a borderline trade.
+- `closed_at_target` is a generic flag, not a width-specific one — `CalendarTab` renders it as "50% profit target" and the analytics tabs read it as a target-close marker. Ticking it earns compliance against a width rule as well. Preserved as-is because changing it would re-grade trades Chris ticked by hand.
 
 ---
 
