@@ -5,6 +5,72 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [3.22.0] — 2026-08-06
+
+### Added
+- **The hold-to-expiry counterfactual (#298).** Every closed trade now carries what it *would* have
+  made had it never been touched, and the portfolio carries the management edge that falls out of
+  it. Audit §8.3 item 14 — "the highest learning value in the backlog." Two columns:
+  `underlying_close_at_expiry` and `held_to_expiry_pnl`.
+- **It is the fifth quantity off the one vertex scan.** Max loss reads `max(V)`, max profit
+  `min(V)`, spread width `max(V)` per unit, POP the region where `netPremium − V(S) > 0`. The
+  counterfactual reads `netPremium − V(S)` at a single S: the price the underlying actually closed
+  at on expiration day. Nothing is modelled — no vol, no drift, no terminal distribution. A
+  counterfactual built on a simulated price would be testing the simulation, not the decision.
+- `heldToExpiryPnl` in `payoff.ts` and `held_to_expiry_pnl` in `import.py`, asserted against the
+  same 17 numbers in both suites.
+- `management_edge`, `management_edge_n` and `management_edge_win_rate` on `PerformanceStats`,
+  averaged over the rows that HAVE a counterfactual.
+- `TradeDetail` renders "Held to exp / Mgmt edge / (settled X)" on closed trades that carry one.
+
+### Validation
+- **The engine was tested against reality before it wrote anything.** 45 trades in this book were
+  genuinely held to expiry. The vertex payoff reproduces their realized P/L on **24 of 24
+  non-index rows** and on **0 of 17 SPX rows**. Of the rows ultimately written, **11 of 11**
+  expired rows reproduce realized P/L to **$0.00**.
+- Second backfill pass wrote **0** rows. ATTACH diff against the pre-run snapshot: only the two
+  new columns differ, no shared column moved, 459 = 459.
+
+### Data
+- 262 of 449 closed trades carry a counterfactual. 187 are gated, by five gates each derived from
+  a probe rather than a spec: index 92 (#299), multi-expiry 34, not-yet-expired 28, anchor 12
+  (#300), equity-leg 10, leg/header credit 8 (#302), futures 3.
+- **On this book: realized −$3,331.80 against −$51,978.07 if held — a management edge of
+  +$48,646.27.** Managing helped on 117 trades (+$71,678), hurt on 130 (−$23,032), and was moot on
+  15. It loses more often than it wins and wins far bigger when it does. Robust to outliers:
+  dropping the five largest contributors still leaves +$37,369 over 257 trades.
+- The metric is descriptive, not prescriptive. Its sample is the set of trades Chris's own rules
+  selected for early exit, so it measures what management DID, not what more of it would do.
+
+### Fixed
+- **`_price_cache` was keyed on ticker alone and returned on any hit**, so a caller requesting a
+  window the first caller never fetched received a dict silently lacking its dates — and
+  `get_price_on_date` then walked back up to five sessions and handed over an older price as if it
+  were the requested one. Every other price consumer ranges over entry..exit; an expiration date
+  sits *after* the exit on every trade closed early, so the expiry lookup was exactly that caller.
+  The cache now stores its covered range and widens to the union on a partial hit.
+- `_differs` hoisted to module scope so every backfill shares one answer about whether a
+  recomputed column actually moved (#288).
+
+### Known
+- **#299 — 17 of 17 SPX rows fail the identity, so index products are gated out entirely.** The
+  residual does not resolve to one convention: 1543 and 1568 reproduce `pnl` at the *previous*
+  session's close, 1626 at the stored date, 1673 only against `pnl + commission`, and five match
+  nothing within five sessions. Trade 1543 is the clean example — short 7090/7100 call vertical,
+  SPX closed at 7137.90 on the stored expiration, and the book records the full credit kept.
+- **#300 — Yahoo serves split-adjusted history.** CRWD split 4:1; 10 rows store pre-split strikes
+  against a series that now reads 111–148. The counterfactual defends itself with an anchor gate
+  (Yahoo's close on the entry date must reproduce the stored spot within 2%); `mfe`, `mae` and
+  `underlying_price_at_close` use the same path with no anchor and would be overwritten with
+  split-adjusted values by a forced re-run.
+- **#301 — the open/close commission split is discarded at write time**, so the counterfactual is
+  charged the full round trip. On early-closed rows that overstates its cost by $1–8 against an
+  edge measured in hundreds. A known bias rather than an unknown one.
+- **#302 — 8 rows store leg premiums that contradict `credit_received`** (trade 1650: legs net
+  11.77, header says 0.25). All 8 are SPX rolls.
+
+---
+
 ## [3.21.0] — 2026-08-06
 
 ### Fixed
