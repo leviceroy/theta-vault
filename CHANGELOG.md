@@ -5,6 +5,79 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [3.23.0] — 2026-08-07
+
+### Fixed
+- **The index gate on the hold-to-expiry counterfactual is lifted (#299).** v3.22.0 excluded every
+  index product outright — 92 of 449 closed trades, a fifth of the book — because the engine
+  reproduced realized P/L on **0 of 17** SPX rows while reproducing it on every non-index row
+  tested. The issue blamed AM-vs-PM index settlement. **It was not that.** Testing six candidate
+  settlement prices per row — the expiry session's open, high, low and close, plus the previous
+  session's open and close — not one failure resolves at the open, which is what an SOQ-settlement
+  bug would look like.
+
+  The real cause is one level up, in how the ground-truth set was built: `exit_date >=
+  expiration_date`. **45 of the index trades are 0-DTE**, so on those rows the exit date equals the
+  expiration date whether the position was managed at 10:31 or left to settle. On equities that
+  filter is a fair proxy for "held to expiry"; on this book's index rows it selects almost nothing
+  correctly. Defined honestly — `exit_reason = 'expired'` — the identity holds on **12 of 18**
+  leg-consistent index rows, and all six disagreements have named data causes that implicate
+  neither the price fetch nor the payoff engine.
+
+  **The gate was a category standing in for a row-level data defect.**
+
+### Added
+- **A settlement-integrity gate replaces it.** A row that says it EXPIRED while carrying a leg
+  whose intrinsic at the settling price is positive and whose `closePremium` is 0 or NULL is
+  self-contradictory: a position held to settlement has no discretion left, and every leg is worth
+  its intrinsic. Trade 1656's short 6925 call settled **184.14 in the money** and is recorded
+  worthless at a P/L of exactly its credit less commission — issue #269's residue, stopped in the
+  importer at v3.15.42 and never backfilled into the rows written before it.
+
+  On such a row the counterfactual is still computable (it needs the legs, the net premium and the
+  settling price, none of which this contradicts) but the *management edge* is not, because the
+  realized side is known-wrong. Gated rather than papered over; the underlying data defect is filed
+  separately.
+
+  **Restricted to `exit_reason = 'expired'` deliberately.** The unrestricted form of the same test
+  fires on 15 index rows, 11 of them `rolled` — and on a rolled or early-closed row a zero
+  `closePremium` is missing data, not a contradiction. Eleven perfectly computable rows would have
+  been thrown away by the blunter rule.
+
+### Data
+- **77 rows gained a counterfactual: 74 SPX and 3 XSP.** Coverage goes 262 → **339 of 449** closed
+  trades. The gate breakdown sums exactly: multi-expiry 34, not-yet-expired 28, leg/header credit
+  17, anchor 13, equity-leg 10, settlement integrity 4, futures 3, no price 1 = 110 excluded;
+  339 + 110 = 449.
+- **The management edge is now +$61,730.55 over 339 trades**, against +$48,646.27 over 262 before.
+  Realized −$6,212.71 versus −$67,943.26 if held. Managing helped on 146 trades (+$94,128) and hurt
+  on 167 (−$32,398) — still losing more often than it wins and still winning bigger when it does.
+  Robust to outliers: dropping the five largest contributors leaves **+$49,578** over 334.
+
+### Validation
+- Validated before any row was written. 11 of 11 non-index and 12 of 18 index rows in the honest
+  ground-truth set reproduce realized P/L to the cent. All six index disagreements are named:
+  trades 1705, 1756 and 1625 were bought to close while labelled `expired` (#304); 1626 is off by
+  **exactly its commission**, $4.88, which is #301's discarded open/close split surfacing;
+  1737 by $5.00 on a spurious put `closePremium`; and XSP 1765 by **ten cents**, because XSP is
+  `^SPX / 10` and Yahoo rounds the index to two decimals.
+- Python fixtures 84 → **94**, including both directions of the new gate: an ITM leg recorded
+  worthless fires it, an ITM leg carrying its intrinsic does not. TypeScript fixtures stay at
+  **128/128**; `tsc --noEmit` clean; `bun run build` succeeds.
+- An ATTACH diff against the pre-change database shows the two counterfactual columns changed on
+  77 rows and **no other column changed at all**; 459 rows before and after.
+
+### Known
+- **Read #303 before citing any of these agreement counts.** Most of them land outside all strikes,
+  where the expiry payoff is a flat constant and a wrong settlement price cannot fail the test.
+  Only 3 of the 23 agreements exercise the sloped region. XSP 1765 agreeing there to ten cents is
+  the single strongest piece of evidence that the index price fetch is right, and it is one row.
+- Trade 1510 is excluded by the anchor gate at 2.5% drift. On an index that gate's original purpose
+  — catching a split-adjusted series — does not apply; what it caught here is an intraday entry on
+  a volatile session. One row lost to conservatism, left as-is rather than loosened without cause.
+
+---
+
 ## [3.22.0] — 2026-08-06
 
 ### Added
