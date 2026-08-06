@@ -68,13 +68,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
   77 rows and **no other column changed at all**; 459 rows before and after.
 
 ### Known
-- **Read #303 before citing any of these agreement counts.** Most of them land outside all strikes,
-  where the expiry payoff is a flat constant and a wrong settlement price cannot fail the test.
-  Only 3 of the 23 agreements exercise the sloped region. XSP 1765 agreeing there to ten cents is
-  the single strongest piece of evidence that the index price fetch is right, and it is one row.
+- **The refutation is narrower than "AM settlement is not the cause."** What was actually tested is
+  the expiry session's **open**, and the SOQ (`SET`) is not the open — it is built from the opening
+  prints of all 500 constituents and is not available from Yahoo at any ticker. For a standard
+  third-Friday AM-settled SPX contract the correct settlement price **does not exist in this data
+  source**, and Friday's close stands in for a contract that stopped trading Thursday.
+  **Four written rows carry a third-Friday expiration: 1434, 1474, 1632, 1756.** All four are flat
+  across ±30 index points — a full session of drift — so their counterfactual is identical whether
+  the price is right or a whole session wrong. Real in principle, empirically zero on this book.
+  The database does not distinguish standard SPX from PM-settled SPXW, so this cannot be gated
+  today; filed as **#306**.
+- **Read #303 before citing any of these agreement counts.** Most land outside all strikes, where
+  the expiry payoff is a flat constant and a wrong settlement price cannot fail the test. Only 3 of
+  the 23 agreements exercise the sloped region. XSP 1765 agreeing there to ten cents is the single
+  strongest piece of evidence that the index price fetch is right, and it is one row.
+  **25 of the 77 newly-written rows sit in the sloped region — that is the true unvalidated
+  surface**, and it is larger than the validation behind it.
+- The metric widened; the trading did not. The edge on the original 262 rows is **byte-identical at
+  +$48,646.27**, verified against the pre-change database. The 77 new rows contribute +$13,084.28
+  on their own — mean +$169.93, **median $0.00**, because most were held rather than managed. The
+  five largest supply $5,425 of that, 41% of the increment.
+- Settlement-price sensitivity: shifting every index settlement by ±1 point moves the aggregate
+  edge by $150–290; by ±10 points, $2,051–2,219. Roughly 3.5% of the total per ten points, so the
+  result is not balanced on price precision.
 - Trade 1510 is excluded by the anchor gate at 2.5% drift. On an index that gate's original purpose
-  — catching a split-adjusted series — does not apply; what it caught here is an intraday entry on
-  a volatile session. One row lost to conservatism, left as-is rather than loosened without cause.
+  — catching a split-adjusted series — does not apply; what it caught is an intraday entry on a
+  volatile session. One row lost to conservatism, left as-is rather than loosened without cause.
+- Trades 1625, 1705 and 1756 receive a counterfactual despite the `expired` mislabel in #304, and
+  that is correct: they were closed early, so a non-zero management edge is the true answer. Only
+  the label is wrong, and the label feeds nothing here.
+
+### Verified
+- Bounds invariant across all 339 rows: every counterfactual lies inside its own structure's
+  `[max loss, max profit]`. **0 violations.**
+- Every written row's expiration date has an exact price bar — the five-session walk-back in
+  `get_price_on_date` was never exercised.
+- `^GSPC` and `^SPX` return byte-identical series, so the ticker choice carries no error.
+- The "trades 1543 and 1568 match at the previous session's close" observation in #299 is
+  **degenerate**: `V(prev_close)` is exactly 0.0 on both and `pnl` is exactly the credit, so the
+  match carries no information about the price fetch. The competing hypothesis — an off-by-one in
+  date alignment — is eliminated, and the ITM-recorded-worthless explanation (#305) survives.
 
 ---
 
