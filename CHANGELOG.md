@@ -5,6 +5,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [3.20.1] — 2026-08-06
+
+### Fixed
+- **The `width_25` and `width_50` exit rules were false for every imported trade (#290).** `evaluateExitRule` answered both with `trade.closed_at_target === true`. The importer ALTERs that column in with `DEFAULT 0` and never writes it — only the trade form ever ticks it by hand — so it is `1` on **0 of 459 rows**. Selecting either rule on a playbook scored every closed trade in it as "Exit Rule missed" no matter how the trade was actually managed. The rules now evaluate realized P/L against `pct% × spread_width × multiplier × quantity`, which became possible when `spread_width` reached 347 rows in 3.20.0. `closed_at_target` is still honoured as a manual override, but it is no longer the whole rule.
+- **The Dashboard printed a width-based GTC target from a different width than the rule is graded against (#291).** `effectiveWidth` spanned the outermost long strikes, which is neither wing of a broken-wing butterfly: on trade 1765 (longs 740 / 725, shorts 735×2) that span is 15 where the risk width is 5. The GTC column pointed three times further out than the exit rule the compliance checker measures. It now reads `spread_width` — the same canonical width, `max(V)` per unit off the payoff vertices — and falls through to the profit-target branch when the width is unknown.
+- **A missed width rule now reports progress in the rule's own units (#290).** The message read "missed (closed at 86% max)", which sounds like a near-miss on a trade that reached 6% of its width. It now reads "missed (closed at 6% of width)" whenever the rule being graded is width-based.
+
+### Added
+- 16 regression assertions for the width rules in `scripts/fixtures/test_payoff_regressions.ts`, anchored to real rows: 1765 (5-wide, clears both targets), 1762 (3-wide 2-lot — pins the per-unit trap at 150 rather than 75), 1702 (a $551 winner that still misses 50% of a 15-wide, proving the rule is not a win/loss proxy), 1749 (debit fly), plus null-width, zero-width, manual-override and futures-multiplier cases. TypeScript gate 75 → **91**; Python gate unchanged at 53.
+
+### Known
+- **The width-based GTC *price formula* is still questionable (#292, open).** `gtc = |credit| + width × pct` treats every width-rule structure as a debit fly bought to be sold. A credit put BWB whose tent peak carries intrinsic value does not close that way — trade 1765 collected 0.33 against a max profit of 5.33. Filed rather than redesigned; GTC order-entry pricing sits under the audit's "belongs in a trading platform" list.
+- On the 30 closed butterflies and BWBs where 25% of width is even attainable, **2 reached it.** That is real feedback about management, and it was invisible while the rule was stubbed.
+
+---
+
 ## [3.20.0] — 2026-08-06
 
 ### Fixed
