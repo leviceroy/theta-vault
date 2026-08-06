@@ -5,6 +5,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [3.21.0] — 2026-08-06
+
+### Fixed
+- **Stored POP came from three clamped delta heuristics and was wrong for every non-directional structure (#294).** `pop` was written by `(1 − |Δ|) × 100` on the insert path, by `(1 − putΔ − callΔ) × 100` in a branch keyed on the broker's `spreadType` string, and by `(1 − 2|Δ|) × 100` in `backfill_greeks` — whichever writer happened to touch the row. All three clamped to `[10, 95]`, which put **156 of 459 rows on exactly 95.0 or 10.0**. Trade 1652 (PLTR long put, Δ −0.0002) stored **95.0**. Trade 1494 (SPX long butterfly) stored **94.62**, and that is the number that multiplied into the **+$9,178 expected value against $300 of real risk** in audit §C3. After the recompute, 1494 reads **11.81** and 1652 reads **0.01**; the clamp artifacts are gone.
+
+### Changed
+- **POP is now the profit region read off the payoff vertices (#294).** `P(S) = netPremium − V(S)` is piecewise linear with kinks only at strikes, so the set where it is positive is a union of intervals whose endpoints are the breakevens — each one a linear interpolation between two adjacent vertices. POP is the risk-neutral measure of that set: `Σ [N(d2(a)) − N(d2(b))]`. The upside tail uses the terminal slope `−callSlope`; `S = 0` is already a vertex, so the downside needs no special case, and `K = 0` maps to probability 1 rather than a `log(0)` blow-up. One engine, no strategy labels, mirrored in TypeScript and Python and asserted to agree to 0.01pp.
+- **`spread_width`, `cached_max_profit`, `cached_max_loss`, `credit_width_ratio` and now `pop` all come off one vertex scan.** The scan gained `vertices` and `valueAt` so callers can read the payoff *between* the extrema rather than only at them.
+- The three delta formulas are marked `@deprecated` in place. They still run so the column is never empty mid-import; the reconciliation pass overwrites them at the end of every run.
+
+### Data
+- Reconciliation pass rewrote `pop` on **456** rows. Second pass reported 0. ATTACH diff against the pre-run snapshot: **`pop` is the only column that changed**, 0 rows added or deleted.
+- Populated **340 of 459**, down from 456 — because the previous number was populated where it had no business being. The 119 NULLs are: **53** 0-DTE trades (entered and expiring the same day, so the terminal distribution is a point mass — #296), **48** calendars and diagonals with no single-expiry payoff, **15** covered calls whose capping shares are not in `legs_json`, **2** with no stored spot, **1** with no IV.
+- The distribution is now shaped like a premium seller's book — 28 rows below 20%, 37 in 20–40, 76 in 40–60, 135 in 60–80, 64 above 80 — rather than 156 rows pinned to a clamp.
+
+### Known
+- **`estimatePop` still inverts outside-profit structures on the live path (#295, open).** Given two breakevens it always assumes profit lies between them; a 95/105 long strangle at spot 100 returns **0.00** where the true answer is **30.50**. The stored column no longer depends on it, but the UI's live-Greeks path still calls it.
+- Trade 1589 (MU iron condor) moved 94.44 → **1.92**, and it is correct: the position was opened with its short call 104 points in the money during MU's April run from 377 to 923. The old number claimed a 94% win probability on a spread that was already underwater by five times its credit.
+- POP buckets do not cleanly predict realized win rates in this book, and that is expected rather than a defect — trades are actively managed at profit targets and at 21 DTE, so realized outcomes are not expiry outcomes. The one signal that does survive: the old POP's bottom bucket won 50% and its top bucket 66% (no discrimination), while the new POP's bottom bucket wins 37.9% against a 66% baseline.
+
+---
+
 ## [3.20.1] — 2026-08-06
 
 ### Fixed
