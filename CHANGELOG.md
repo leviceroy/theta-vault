@@ -28,6 +28,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
   genuinely held to expiry. The vertex payoff reproduces their realized P/L on **24 of 24
   non-index rows** and on **0 of 17 SPX rows**. Of the rows ultimately written, **11 of 11**
   expired rows reproduce realized P/L to **$0.00**.
+- **That agreement is weaker than it reads, and #303 records why.** Trades held to expiry are
+  self-selected — you let them run when they are working — so **10 of those 11 landed outside all
+  strikes**, where the expiry payoff is a flat constant and the fetched price could be wrong by a
+  wide margin without failing the test. Only trade 1235 landed inside the strike range. The
+  sloped region of the payoff is covered by 36 hand-derived fixture assertions across both
+  languages, but those are synthetic; the real-book test mostly validates the credit arithmetic
+  and the NULL gates. Surfaced by an advisor review at the commitment boundary, not by the suite.
 - Second backfill pass wrote **0** rows. ATTACH diff against the pre-run snapshot: only the two
   new columns differ, no shared column moved, 459 = 459.
 
@@ -68,6 +75,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
   edge measured in hundreds. A known bias rather than an unknown one.
 - **#302 — 8 rows store leg premiums that contradict `credit_received`** (trade 1650: legs net
   11.77, header says 0.25). All 8 are SPX rolls.
+- **#303 — the real-book ground truth barely exercises the price-sensitive payoff region** (see
+  Validation above). 102 closed trades reached their expiration date, not 45; the 3 `assigned`
+  rows are free ground truth in the sloped region and were left on the table.
 
 ---
 
