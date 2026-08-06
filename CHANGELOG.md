@@ -5,6 +5,60 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [3.20.0] — 2026-08-06
+
+### Fixed
+- **`spread_width` reached only five strategy labels and missed 214 trades (#286).** `compute_spread_width` dispatched on `spreadType` and read the denormalized `shortStrike` / `longStrike` columns, which are `0` on 55 short put verticals whose `legs_json` carries the strikes perfectly well. Every butterfly, every broken-wing butterfly and 20 short call verticals got nothing at all. The TypeScript twin `computeSpreadWidth` returned the *outer* strike span, which is the wide wing on a BWB — 50 on trade 1434, where the risk wing is 25.
+- **Trade 1634 carried a negative width of −10, and trade 1325 a width that hid two naked short puts (#286).** Both are now NULL. 1325's stored 10 described its call spread while two short 7-strike puts sat underneath it, so the sizing check and the credit/width test were both reading a defined-risk structure that was not one.
+- **The reconciliation pass rewrote columns it had determined were unchanged (#288).** Recomputing a stored double reproduces it to within about one ULP rather than bit-for-bit, so rewriting rows for a width change re-rounded three `cached_max_loss` values by ~4e-13. Semantically zero, but it made the "no other column moved" audit unprovable — which is the check that catches a real regression. Each column now keeps its stored value wherever the tolerance says it did not move.
+
+### Changed
+- **Width is now derived from the payoff vertices, shared with the max profit / max loss engine (#286).** `width = max(V)` per unit, falling back to `−min(V)` when the structure carries no expiry liability at all, where `V(S)` is the expiry liability scanned at `{0, every strike}`. Width is `max(V)` because `max(V)` is what max loss is measured against — that makes it a property of the strike geometry with no premium in it and no dependence on the strategy label. It is deliberately not the payoff's total span: on a broken-wing butterfly the span is the wide wing and `max(V)` is the narrow risk wing, and only the narrow wing reproduces the stored BPR.
+- **NULL, never 0, for anything that is not structurally a spread (#286).** Net put quantity or net call quantity nonzero (an unhedged leg — a cash-secured put's `V(0)` is its whole strike, so an ungated scan would have reported a width of 205 on trade 1221), more than one expiration, or a strategy label that says calendar/diagonal while the legs do not show two expiries.
+- `computeSpreadWidth` (TypeScript) and `compute_spread_width` (Python) are marked `@deprecated` for risk math. `TradeForm` now writes width from the vertex derivation.
+
+### Added
+- **`credit_width_ratio` backfilled for every credit structure that has a width (#287).** It stood at 8 of 459 rows because only `TradeForm` ever wrote it; 325 rows had both inputs and a NULL ratio. Population 8 → 333, every value inside (0, 100]. Trade 1434 reads 14.0% against its narrow risk wing; against the wide wing it would have read 7%.
+- 10 TypeScript and 11 Python regression fixtures covering the width rule on the same structures in both engines — BWB, debit fly, multi-lot normalization, the wider-side iron condor, and the four NULL cases. Suites now stand at **75** TypeScript and **53** Python.
+
+### Data
+- Backfilled `spread_width` on 112 rows: 108 NULL → value, 3 demoted to NULL, 1 corrected (trade 1719, 20 → 30). Population **242 → 347**. `credit_width_ratio` written on 325 rows.
+- The rule was validated before any write by recomputing the 242 rows that already carried a width: **238 reproduce**, and all four disagreements are bad stored values rather than rule failures.
+- Idempotent — a second pass reports 0 — and an ATTACH diff against the pre-write `VACUUM INTO` backup shows zero changes to `cached_max_profit`, `cached_max_loss`, `bpr`, `pnl`, `credit_received`, `legs_json`, `strategy` or `quantity`.
+
+### Known
+- **Trade 1719's stored BPR of 1345 matches neither side of the structure (#289).** It is three 10-wide short call verticals stacked with a 20-wide short put vertical; the call side's aggregate liability is 30, so max loss is 2072 — which is what `cached_max_loss` already holds. `compute_bpr`'s iron-condor branch takes `max(put_width, call_width)` from the first two legs of each type and never aggregates stacked spreads. Filed, not fixed.
+- The strict both-sides-hedged gate also rejects a call ZEBRA (trade 1504), which is defined-risk with net-long tails. Three of the four rows it rejects this way are single-leg long options where NULL is unambiguously right. Left alone deliberately; widening the gate is its own change.
+
+---
+
+## [3.19.0] — 2026-08-05
+
+Closes the last critical item on the audit's §8.2 list.
+
+### Fixed
+
+- **`cached_max_profit` and `cached_max_loss` were never written at import (#283).** They sat on 15 and 14 of 459 trades. `import.py` created both columns and never populated them; the only writer was `TradeForm`. Everything that divides by max profit was computing on 3% of the book — `% of max profit captured`, the `profit_target_N` compliance rule, the AnalyticsTab basis, the alerts profit target — and everything needing max loss fell back to `bpr`, which is collateral, not risk. `% of max profit captured` now reads on **259** closed profitable trades instead of 15.
+- **Max profit and max loss were sampled from a padded chart window (#284).** `calculateMaxProfit` and `calculateMaxLoss` take the extremum of a payoff curve drawn over `[minStrike − pad, maxStrike + pad]` with `pad = max(spread × 0.45, spot × 0.04)`. A cash-secured put's worst case is at S = 0 and a long call's best case is at S → ∞; both lie outside that window. Every one of the 15 populated rows was wrong as a result — trade 1603 stored a **$51.60** max loss on a 3-lot CSP against a true **$3,840**, trade 1722 stored **$2,034.45** against **$20,559**, and trade 1597 stored a **$63.80** ceiling on a long call whose upside has none.
+- **Seven calendar and diagonal trades carry `legs_json` that does not show two expiries (#285).** Two have `expirationDate` null on every leg, two show the same date on both legs, three carry a single leg. A single-expiry calculation reads these as ordinary verticals; trade 1800 produced a $3,317 max profit that way. Both columns are now written as NULL whenever the strategy label is calendar-family but the legs disagree. The underlying leg data still needs repairing at import.
+
+### Changed
+
+- **Both quantities now come from the payoff vertices, in one scan.** The expiry payoff is piecewise linear in S with kinks only at strikes, so *both* extrema of the liability `V(S) = Σ (short ? +1 : −1) × intrinsic × qty` are attained at a vertex. Profit at expiry is `P(S) = netPremium − V(S)`, so max loss reads off `max(V)` and max profit off `min(V)` — probing `{0, every strike}` gives both exactly, with no window to get wrong and no dependence on strategy label, leg order or wing symmetry. `boundedMaxLoss` (shipped in 3.18.0) and the new `boundedMaxProfit` share the scan in both languages.
+- **NULL where a bound does not exist, never 0.** A naked short call has no max loss and a naked long call no max profit; a calendar has no single-expiry payoff at all, since its value at front expiry depends on the back month's implied vol — a model output, not a bound. A covered call stores only its short call leg, so the shares that cap the downside are not in the record and its max loss is NULL rather than invented. Every consumer tests `!= null`, so a 0 would read as a real zero.
+- **`TradeForm` writes through the same functions**, so hand-entered and imported trades land on one basis — and it now passes the contract multiplier, which the old call path did not.
+- **The importer reconciles both columns as a whole-table pass** at the end of each run rather than inline in `insert_trades`, because trades reach the table through four writers (insert, roll update, intraday IC merge, expiry auto-close). Idempotent: a second run writes 0 rows.
+
+### Added
+
+- 20 TypeScript fixtures and 17 Python fixtures for the two quantities (65 and 42 total, from 45 and 25). Eight expected numbers appear in both suites, so cross-language drift fails a test. Fixture leg data is copied verbatim from `trades.db`; the `/NG` iron condor case pins the futures multiplier and independently reproduces that trade's stored BPR.
+
+### Data
+
+- Backfilled 458 of 459 rows. `cached_max_profit` populated on 405, `cached_max_loss` on 436, with every NULL accounted for: 47 multi-expiry or unbounded-upside for profit, 15 covered calls plus one credit diagonal for loss. An ATTACH diff against the pre-repair snapshot confirms `pnl`, `bpr`, `legs_json`, `status`, `credit_received`, `pop` and `spread_width` are untouched. The two inverted GLD condors (1531, 1540) correctly return NULL max profit — they were entered below their floor liability.
+
+---
+
 ## [3.18.0] — 2026-08-05
 
 ### Fixed
