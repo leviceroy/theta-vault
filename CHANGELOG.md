@@ -5,6 +5,64 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [3.25.0] — 2026-08-07
+
+### Changed
+- **One implementation each of return on capital and theta capture (§8.3 item 16).** The audit
+  counted four ROC definitions and two theta models. Probing the book first says the count is right
+  and the framing is not: there are **two metrics** — credit ROC (`credit ÷ BPR`, entry-time
+  potential) and realized ROC (`pnl ÷ BPR`, outcome) — implemented **six** times between them, one
+  more than the audit found. The thing it counted fourth, `backtestMath`'s `weightedPnl ÷
+  accountSize`, is not a ROC at all; its denominator is the account, not the position's capital.
+- **The theta models did not merely differ in magnitude — they disagreed in sign.** The linear model
+  behind the Dashboard sub-label (`|θ| × holdDays`) reported **−2.4%** capture over 445 trades; the
+  √t model behind the Overview tile reported **+11.68%** over 383. One screen said the book bled
+  theta and the other said it captured it. Both now read **11.65%** off `calculateTheoreticalTheta`,
+  the √t model the audit chose, and the linear one is deleted rather than deprecated.
+- **Three of the six ROC copies hardcoded a contract multiplier of 100.** Trade 1647 (`/NG`,
+  multiplier 10000) collects 0.05 against 500 of BPR — $500 of premium against $500 of capital, a
+  **100%** return. The Dashboard printed **1.0%**. Trade 1710 (`/CL`) printed 4.08% against 40.85%.
+  Both canonical functions now take the trade rather than four loose arguments, so the multiplier is
+  looked up rather than assembled at a call site, which is exactly where it went missing: every
+  inline copy was written against an equity screen, where 100 happens to be right.
+- **The Dashboard averaged its ROC over 406 rows where the Performance tab averaged over 281.** It
+  filtered on a truthy `credit_received`, so **55 debit structures** joined a metric they do not have
+  carrying a negative credit ROC. Both now average over the 281 rows that have one.
+- **The two metrics are named distinctly wherever they appear.** Dashboard, Playbook, Analytics and
+  the strategy tables say **Credit ROC**; the Journal column and the ticker table say **Realized
+  ROC**. They were both "ROC" before, on screens one keystroke apart, and they are not the same
+  number even when both are right.
+
+### Fixed
+- **`PlaybookTab` rendered a ROC fraction with a percent sign** — a 12% credit ROC printed as
+  **0.1%**. This is defect C4 from §8.2, fixed on the Dashboard in an earlier release and still live
+  here. A single `fmtRocPct` now owns the conversion; no render site multiplies a ROC by 100.
+- **The Journal's ROC column sorted on a metric it does not display.** Clicking the header ordered
+  rows by credit ROC while the cells showed realized ROC, so the sort looked broken on any row where
+  the two disagree — which is every row. Both are now the realized figure.
+- **A strategy with no credit ROC rendered `0.0%` rather than `—`.** The per-strategy running mean
+  folded a literal zero in for every debit structure, dragging any mixed strategy's ROC toward zero
+  in proportion to how many of its trades were debits. `StrategyBreakdown.avg_roc` is now
+  `number | null`, which made the type checker enumerate every consumer that would have shown the
+  absence as a value.
+
+### Notes
+- **The equity book is untouched, and that was the criterion.** All **446** closed equity rows were
+  recomputed against a pre-change baseline: **0 moved**. The only per-trade values that change are
+  the three futures rows, which were wrong by their multiplier ratio.
+- **Theta capture's population was deliberately NOT widened.** Dropping the `credit_received > 0`
+  filter moved the headline from +11.68% to −0.61% — a change of metric wearing a refactor's
+  clothes. The filter is preserved and single-sourced in `isThetaCaptureEligible`, so this release
+  unifies two implementations without changing what either reported.
+- **Known bias, filed rather than fixed (#309).** The √t denominator estimates total extrinsic as
+  `|θ| × entryDte`, which holds the entry decay rate constant. For an ATM option Black-Scholes puts
+  the true figure at roughly **half** that, so capture is understated across the board and the ≥80%
+  target is calibrated against a biased model. Correcting it changes what the metric measures.
+- Gates: **145/145** TypeScript fixtures (128 before this release) · **106/106** Python ·
+  `bunx tsc --noEmit` clean · `bun run build` succeeds.
+
+---
+
 ## [3.24.0] — 2026-08-07
 
 ### Added
