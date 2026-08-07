@@ -5,6 +5,61 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [3.26.0] — 2026-08-07
+
+### Changed
+- **The post-mortem block is promoted (§8.3 item 18).** It was populated on 4 of 459 trades, and the
+  reason turns out to be structural rather than behavioural: the whole block was wrapped in a guard
+  that required its own data to already exist, so on the other 455 trades it did not render at all —
+  and where it did render, it sat at line 1211 of a 1,215-line screen. Nothing on screen suggested
+  the feature existed. It now renders on **every closed trade**, directly under the outcome numbers
+  in CLOSE SUMMARY, and when empty it states what it wants: Entry, Management and Sizing 1–5, the
+  thesis outcome, the lesson. Open trades do not show it — scoring management on a position that is
+  still running has no answer yet. The inputs were always there in the trade form.
+
+- **Fonts are bundled; the app no longer phones Google to start (§8.3 item 19).** Line 1 of
+  `index.css` fetched Inter and JetBrains Mono from `fonts.googleapis.com` on every launch of a
+  local-first, no-subscription, privacy-positioned desktop app — and it meant that offline, the
+  entire monospace-alignment premise degraded to Menlo. Both families now ship in the bundle as nine
+  latin-subset woff2 files (~270 kB total) via `@fontsource`. `dist/` contains zero references to
+  `fonts.googleapis.com`.
+
+- **`fetch_betas` is concurrent, and a failure is now visible (§8.3 item 20).** It looped tickers
+  sequentially — one 8-second timeout per failing ticker, serially — and folded every failure into
+  `.unwrap_or(1.0)`. A beta of exactly 1.0 is a perfectly plausible market-neutral value, so an
+  unreachable Yahoo produced a beta-weighted delta computed at beta 1.0 across the whole book with
+  nothing on screen to say the number was fabricated. Requests now run concurrently through a
+  `JoinSet`, and the command returns `{ betas, unresolved }` instead of a map padded with ones.
+  Readers still fall back to 1.0 — that part is correct — but the BWD card now carries a `β?N`
+  marker and names the unweighted tickers, so the fallback is stated rather than disguised.
+
+### Not changed — and why (§8.3 item 17)
+
+Item 17 reads "populate `fill_vs_mid` from limit-vs-fill data the importer already parses."
+**Nothing was populated, because the metric the column is named for cannot be computed from this
+data source.** Three findings, each filed as an issue:
+
+- **No statement section carries a bid, an ask, or a mid — at any point.** Fill *vs mid* is not
+  derivable from a Schwab account statement at all. What is derivable is fill vs **limit**, which is
+  a different quantity; writing it into a column called `fill_vs_mid` would be the fourth occurrence
+  in this audit of a value rendered under a label it does not match.
+- **Fill-vs-limit carries almost no signal anyway.** Measured across the four statements that still
+  exist: 20 FILLED orders, of which 17 paired to an actual net fill and **15 executed exactly at the
+  limit**. The two that differed were SPX +0.10 and ZS +0.02. (The 3 that did not pair are an
+  artifact of the throwaway matcher, not missing data — it keys on the placement minute, and one QQQ
+  condor executed nine minutes after it was placed. In the one statement checked by hand, all ten
+  filled orders match their limit to the cent.) You are filled at your limit or you are not filled —
+  that is what a limit order does.
+- **The importer would not see it in any case.** The Account Order History parser expects the
+  15-column ToS layout (`Notes,,Time Placed,Spread,…`); the current Schwab export ships five columns
+  (`Notes,,Order ID,Description,Status`), so its `len(row) < 12` guard has been skipping every row
+  since the format changed. The section is also parsed into a dict key that nothing but a log line
+  has ever read.
+
+Backfill is impossible regardless: four statement files survive against a 459-trade book.
+`fill_vs_mid` and `bid_ask_spread_at_entry` remain **0/459** and belong to the drop-or-hand-enter
+decision in §8.4 item 29, which is a product call rather than a calculation one.
+
 ## [3.25.0] — 2026-08-07
 
 ### Changed
