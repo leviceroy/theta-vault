@@ -5,6 +5,59 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [3.27.0] — 2026-08-07
+
+### Changed
+- **The IV schema contract is written down and the `> 2` guess is deleted (§8.4 item 27).**
+  `normalizeIv`/`normalizeIvFrac` decided whether a stored volatility was a fraction or a percent by
+  asking whether it exceeded 2 — and their own docstring told callers not to inline that test, which
+  **seventeen call sites did anyway**. Same shape as item 16's ROC: a canonical function nobody calls,
+  so the guess gets re-derived everywhere.
+
+  The guess is wrong on this book. Three surfaces store an IV as a fraction and all three legitimately
+  exceed 2.0: `implied_volatility` (max 2.1098), `iv_at_close` (max 2.8835) and `legs_json[].iv`
+  (max 2.5341). **Five stored values were being read at one hundredth of their true volatility** —
+  AMZN trade 1267 at 211% read as 2.11%, and four more — with every Greek, POP, P50, PIT and expected
+  move on those rows computed at the wrong vol. Eight further values sit in [1.5, 2.0]: correct today
+  only because they have not ticked higher.
+
+  The fix turned out to be a deletion rather than a better rule. **Every IV column in this schema is
+  a fraction** — including `iv_before_earnings` and `iv_after_earnings`, which `TradeForm` divides by
+  100 on write — so the correct conversion to a fraction is the *identity*. `hv20_at_entry`
+  (26.1–118.36) is the sole percent-valued volatility column, and the contract now says so in one
+  place. `ivFraction`, `ivPercent` and `isPlausibleIvFraction` replace the two guessing functions.
+
+  **All 924 stored IV values were recomputed against the old reader: exactly 5 moved, 919 did not.**
+
+### Fixed
+- **`TradeForm` was writing a percent into a fraction column, and the guess was hiding it.** On close,
+  `ivAtClose` was computed as `Math.round(avgIv * 1000) / 10` — turning the solver's 0.2812 into
+  **28.1** and storing it in `iv_at_close`, whose every other value is a fraction. It round-tripped
+  only because the reader saw `28.1 > 2` and divided it back. Deleting the guess without finding this
+  would have made the next hand-closed trade read as **2810% vol**. It now stores the fraction, and
+  refuses implausible values instead of silently rescaling them. No stored row was affected — the
+  column's maximum is 2.8835 — so this was latent, not live.
+
+- The comment at `TradeForm.tsx:331` asserted the opposite of the truth: *"Returns whole-number
+  percent (e.g. 28.1 for 28.1% IV) to match implied_volatility storage convention."* The column's
+  maximum is 2.1098. Corrected.
+
+### Assessed, not built (§8.4 item 30)
+
+Item 30 bundles two changes that turn out to have very different magnitudes and different blockers.
+Measured against each affected trade's own stored spot, strike, DTE and IV:
+
+- **Dividend yield `q` in `bsD1` — worst error 7.31 delta points**, across 32 legs on 18 trades
+  (IBM, JPM, T, MCD, XOM; GLD pays no dividend and is excluded). Those positions average **137 DTE**,
+  which is why the bias is not negligible: a 30-delta short put can read as a 37-delta one. **Blocked
+  on data.** There is no dividend yield anywhere in the app, `ex_dividend_date` is 0/459, and adding
+  one means a new network dependency in a local-first app — a product decision, not a calculation fix.
+- **Black-76 for futures options — worst error 1.21 delta points**, across 6 legs on 3 trades
+  (`/CL`, `/NG`, `/ZC`, one each). Self-contained and buildable, but it changes the core pricing
+  engine every other number depends on, to move three rows by about one delta point.
+
+Filed with the numbers rather than guessed at.
+
 ## [3.26.0] — 2026-08-07
 
 ### Changed
