@@ -14,11 +14,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
   potential) and realized ROC (`pnl ÷ BPR`, outcome) — implemented **six** times between them, one
   more than the audit found. The thing it counted fourth, `backtestMath`'s `weightedPnl ÷
   accountSize`, is not a ROC at all; its denominator is the account, not the position's capital.
-- **The theta models did not merely differ in magnitude — they disagreed in sign.** The linear model
-  behind the Dashboard sub-label (`|θ| × holdDays`) reported **−2.4%** capture over 445 trades; the
-  √t model behind the Overview tile reported **+11.68%** over 383. One screen said the book bled
-  theta and the other said it captured it. Both now read **11.65%** off `calculateTheoreticalTheta`,
-  the √t model the audit chose, and the linear one is deleted rather than deprecated.
+- **The theta models did not merely differ in magnitude — they disagreed in sign.** Over the whole
+  book the linear model behind the Dashboard (`|θ| × holdDays`) gave **−2.47%** capture across 445
+  trades; the √t model behind the Overview tile gave **+11.68%** across 383. One said the book bled
+  theta, the other said it captured it. Both now run `calculateTheoreticalTheta` — the √t model the
+  audit chose — over one population, and the linear model is deleted rather than deprecated.
+- **The two screens still show different numbers, and that is correct.** The Overview tile is a
+  whole-book aggregate and reads **11.68% → 11.65%**. The Dashboard sub-label is a rolling 20-trade
+  window and reads **−61.46% → −106.98%**. They were never the same quantity; before this release
+  they were not even the same *metric*, so the difference could not be read. It can now.
+- **The −107% on the last twenty trades is a real signal, not an artifact.** Nineteen of those
+  twenty are theta-eligible and they sum to **−$1,280** against a positive theoretical accrual. The
+  old linear model reported −61% for the same window, understating it, because holding the entry
+  decay rate constant inflates the denominator on longer-dated trades.
 - **Three of the six ROC copies hardcoded a contract multiplier of 100.** Trade 1647 (`/NG`,
   multiplier 10000) collects 0.05 against 500 of BPR — $500 of premium against $500 of capital, a
   **100%** return. The Dashboard printed **1.0%**. Trade 1710 (`/CL`) printed 4.08% against 40.85%.
@@ -52,13 +60,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
   the three futures rows, which were wrong by their multiplier ratio.
 - **Theta capture's population was deliberately NOT widened.** Dropping the `credit_received > 0`
   filter moved the headline from +11.68% to −0.61% — a change of metric wearing a refactor's
-  clothes. The filter is preserved and single-sourced in `isThetaCaptureEligible`, so this release
-  unifies two implementations without changing what either reported.
+  clothes. The filter is preserved and single-sourced in `isThetaCaptureEligible`.
+- **The Overview tile's 3bp move is fully attributed.** Decomposing (old model, old population) →
+  (new model, old population) → (new model, new population) gives **−2.468% → 11.682% → 11.654% →
+  11.654%**. The population step is **exactly 0.000pp**, so the filter really was preserved rather
+  than re-derived; the 0.028pp is the contract multiplier reaching the denominator. It is small
+  because trade 1647 (`/NG`) is the only futures row in the population and its θ is 0.0003 — its
+  own denominator is **100× wrong** (0.52 → 51.50) while the aggregate barely notices. That is
+  precisely the defect shape an aggregate gate cannot see, so it is pinned by two fixtures.
+- **The rolling series is NaN-padded, not filtered** — 449 entries for 449 closed trades, 3 NaN,
+  so chart x-indices stay aligned with the trade array. Verified by probe, not by reading the code.
 - **Known bias, filed rather than fixed (#309).** The √t denominator estimates total extrinsic as
   `|θ| × entryDte`, which holds the entry decay rate constant. For an ATM option Black-Scholes puts
   the true figure at roughly **half** that, so capture is understated across the board and the ≥80%
   target is calibrated against a biased model. Correcting it changes what the metric measures.
-- Gates: **145/145** TypeScript fixtures (128 before this release) · **106/106** Python ·
+- Gates: **147/147** TypeScript fixtures (128 before this release) · **106/106** Python ·
   `bunx tsc --noEmit` clean · `bun run build` succeeds.
 
 ---
