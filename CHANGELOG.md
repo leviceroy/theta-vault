@@ -5,6 +5,70 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [3.24.0] — 2026-08-07
+
+### Added
+- **The trade replay timeline (§8.3 item 15).** Every closed trade held at least three sessions now
+  carries the path it actually took — **303 of 449**, 3,793 stored sessions — rendered in the detail
+  screen with short-strike reference lines, the management-DTE marker and the entry/exit points.
+
+### Fixed
+- **The audit item asks for three series and only one of them is measurable.** `iv_snapshots` exists
+  and holds **zero rows**. Implied volatility is stored at entry on 448 of 449 closed trades and at
+  close on **126**, and there is no option-price series anywhere. So the underlying path is read
+  from Yahoo and the P/L path is modelled — and the two are kept apart in the stored data, not only
+  in the rendering: `iv` and `m` are null together on 100% of stored points.
+
+- **The stored `implied_volatility` cannot price the position it is attached to.** One number
+  against a four-legged structure whose legs are struck at four different vols. The proof is free:
+  the model priced at the entry spot with the entry vol must return **exactly zero** P/L on the
+  entry bar, and the stored value left a median residual of **$21**, a p90 of **$335** and a
+  maximum of **$1,536** — while missing realized P/L at the exit by **$262 at p90**, drawn beside
+  the exact realized number.
+
+  So the volatility is **solved, not read** — by bisection from each trade's own fill premiums at
+  entry and its closing premiums at exit, rejecting non-unique roots. It is a fitted parameter and
+  the code says so; its job is to pin the curve's endpoints to measured data so the path between
+  them interpolates between two true points instead of extrapolating from one guess. Coverage went
+  **up** as a result, 81 → 112, because solving needs no `iv_at_close`.
+
+### Data
+- **Every drawn P/L curve starts at exactly $0.00 and ends within $9.36 of the realized number.**
+  That residual is the open commission, which #301 makes impossible to isolate. A final gate drops
+  the modelled series on 16 rows whose exit model misses realized by more than $15 — those are rows
+  where the legs and the header describe different closes (trade 1439: legs say $3,384 gross, the
+  row says $556.04), filed as **#307**.
+- Gate partition sums exactly: written 303, gated {futures 3, too short 130, no price 1, anchor 12}
+  = 146; **303 + 146 = 449**. `mtm_structure` 191 and `mtm_endpoint` 16 are sub-counts of written
+  rows — a gated MtM still keeps its measured underlying path.
+- Database 740 KB → 1.0 MB. Data commits get correspondingly larger.
+
+### Validation
+- Solved σ at entry tracks the stored IV **it never uses** — median **0.93×**, 93% within
+  0.7–1.4×. Genuinely out-of-sample: `implied_volatility` is not an input to the solve.
+- **0 of 3,793 points** fall outside their own structure's `[−max_loss, max_profit]`. This is the
+  check that binds the *interior* of the curve; endpoint exactness is guaranteed by construction
+  and therefore proves the least.
+- 0 solves pinned at a bracket edge; solved vols span 0.046–1.370.
+- Python fixtures 94 → **106**. TypeScript **128/128**, `tsc --noEmit` clean, build succeeds.
+  ATTACH diff: only `replay_json` changed; 459 rows, 0 added, 0 deleted.
+
+### Known
+- **No pixel of this chart has been seen.** The app reaches SQLite through
+  `@tauri-apps/plugin-sql`, so a browser render shows an error state rather than the component and
+  an automated screenshot would verify nothing. It typechecks, it builds, and its data contract is
+  covered by fixtures — visual verification is filed as **#308** and is genuinely outstanding.
+- **The interpolation between the two solved vols is linear in calendar days, and real vol is
+  not.** IV rises when spot falls, so mid-path drawdown is systematically understated on exactly
+  the trades where drawdown is the lesson. Multi-expiry structures and equity-leg strategies are
+  excluded outright — one vol cannot serve a calendar's two expiries — but skew traversal within a
+  single expiry is not modelled.
+- The stored `iv` series is deliberately **not plotted**. It is a straight line between two fitted
+  points, carrying no information beyond its endpoints while wearing the name of a measured market
+  quantity.
+
+---
+
 ## [3.23.0] — 2026-08-07
 
 ### Fixed
