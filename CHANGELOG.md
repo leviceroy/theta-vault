@@ -5,6 +5,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [3.29.3] — 2026-08-08
+
+### Fixed
+The v3.29.1 multi-expiry fix was half a fix. The second cross-vendor audit pass found both halves
+(**#329**).
+
+- **`calculateP50` carried its own copy of the expiry check.** The same
+  `new Set(legs.map(l => l.expiration_date)).filter(Boolean).size > 1`, in a second place — so
+  v3.29.1 taught `payoffVertexScan` to refuse a mixed dated/undated calendar while `calculateP50`
+  went on emitting a confident number for the same structure, straight into the calibration panel.
+  Two implementations of one rule, which is the defect class this audit exists to remove.
+- **The conservative rule nulled structures that were fine.** `TradeForm` displays the header expiry
+  for an undated leg but persists a date only when the user picks one, so touching one leg of an
+  ordinary vertical — even setting it to the header's own date — produced the mixed shape and
+  v3.29.1 refused to price it.
+
+Both are fixed by one exported helper, `legsSpanMultipleExpiries(legs, fallbackExpiry?)`, used by
+`payoffVertexScan` and `calculateP50` alike. An undated leg **resolves** to the fallback when one is
+supplied, so `TradeForm` and the Dashboard now pass the trade's `expiration_date` and the mixed shape
+reads correctly as single-expiry. Without a fallback the answer stays conservative — dated and
+undated legs together cannot establish a single expiry, and a null beats a fabricated number.
+
+### Known gap
+A calendar entered by hand whose back month lives only in the trade-level `back_month_expiration`,
+with **no** leg carrying a date, is still scanned as single-expiry: nothing in `legs_json` records
+which leg is the back month. That is a data-model gap, not a check that can be tightened — filed.
+
+### Testing
+- TypeScript fixtures **168 → 173**.
+
+---
+
 ## [3.29.2] — 2026-08-08
 
 ### Fixed
