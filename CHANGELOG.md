@@ -5,6 +5,59 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [3.29.0] — 2026-08-08
+
+### Removed
+- **`estimatePop` is deleted (#295).** Its integrand was right and its premise was a guess: given two
+  breakevens it assumed profit lay *between* them, and given one it inferred direction from whether
+  the breakeven sat below spot. Neither is a property of a breakeven — it is a property of the
+  payoff, which the breakeven does not carry. So on every structure that profits *outside* its
+  breakevens it returned the probability of the **loss** region, and the number on screen was the
+  exact complement of the truth. Measured against `popFromLegs` before deletion:
+
+  | structure (spot 100, 30% IV, 45 DTE) | `estimatePop` | truth |
+  |---|---|---|
+  | long strangle 95/105 | **60.80%** | **39.20%** |
+  | long call 100 @ 3.00 | **61.05%** | **38.95%** |
+  | short strangle 95/105 — the premise's own case | 60.80% | 60.80% |
+
+  The last line is why this survived eight releases: every structure the premise fits reproduces the
+  correct answer exactly. v3.21.0 replaced the **stored** column with `popFromLegs` and left this
+  function on the **live** path, so hand-entered trades and the Dashboard fallback kept the guess.
+
+### Changed
+- **All three live call sites now use `popFromLegs`** — `TradeForm`'s entry POP, `TradeForm`'s
+  close POP, and the Dashboard's fallback. One implementation, which is the audit's own
+  highest-leverage structural recommendation applied to POP for the fourth time.
+- **The unit defect the reroute exposed (#326).** `pop` has been a **percent** since v3.21.0;
+  `TradeForm` was writing `estimatePop`'s **fraction** into it. Latent, not landed — `pop` holds 336
+  values above 1 and exactly 2 at 0.01, both genuine results of the v3.21.0 backfill — because no
+  trade has been hand-entered since the column changed meaning. The next one would have stored 0.608
+  and rendered as **0.6%**. `pop_at_close` carried the identical mismatch. This is #319's shape one
+  release later in the same file, which is now filed as its own structural finding: **`TradeForm`
+  writes 60 of the trades table's 86 columns, and no backfill ever corrects it (#325).**
+- **The `[0.10, 0.95]` clamp is gone from the Dashboard fallback.** v3.21.0 retired that clamp for
+  pinning 156 rows to exactly 95.0 or 10.0, but only on the stored path; the fallback two lines below
+  re-imposed it, so trade 1652's genuine **0.01%** came back as **10%**.
+- **`null` is handled explicitly at every site.** `popFromLegs` returns `null` — never a clamped
+  default — when the payoff cannot support a number. `pop` and `pop_at_close` are left unwritten
+  rather than coerced to 0, and the Dashboard skips the row rather than averaging in a zero, which is
+  the `?? 0` trap that wrecked the portfolio average once already at v3.21.0.
+- POP no longer depends on breakevens at any call site, so `calculateBreakevensForJournal` returning
+  `[]` for six strategies — the path that produced #295's filed figure of 0.00 — can no longer reach
+  this metric.
+
+### Testing
+- TypeScript fixtures **159 → 165**. The two cross-checks that used `estimatePop` as their reference
+  now compare against **literals captured from it while it still existed** (IC 52.019132, short put
+  vertical 75.042353); comparing against the live function would have silently become the engine
+  checking itself. The fixture that deliberately pinned the bug — *"estimatePop inverts the same
+  structure to ~0"* — is replaced by the #295 regression pair plus a percent-not-fraction assertion
+  and two `null` guards.
+- `trades.db` unchanged.
+
+---
+
 ## [3.28.0] — 2026-08-08
 
 ### Added
