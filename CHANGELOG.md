@@ -5,6 +5,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [3.29.2] — 2026-08-08
+
+### Fixed
+- **The IV magnitude guess survived v3.27.0 at a threshold its own anti-check could not see.**
+  v3.27.0 deleted `iv > 2 ? iv / 100 : iv` from 17 call sites and verified that the four surviving
+  `> 2 ?` comparisons were `bprPct`, `distPct` and `erDays`. It never looked for **`> 1 ?`** —
+  and `TradeForm.tsx` had one, on the per-leg IV input: `leg.iv > 1 ? leg.iv : leg.iv * 100`.
+  Every IV column stores a fraction, so trade 1267's real **2.1098** rendered as **2.1%** instead of
+  211.0%. Worse than a display bug, because this is an **editable input**: re-typing what it showed
+  would have written `2.1 / 100 = 0.021` back into the leg, turning a wrong reading into wrong data —
+  the same "a guess hides a write defect" shape as #319. Now `ivPercent(leg.iv)`, the identity-based
+  converter the contract defines.
+
+---
+
 ## [3.29.1] — 2026-08-08
 
 ### Fixed
