@@ -5,6 +5,56 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [3.28.0] — 2026-08-08
+
+### Added
+- **Leg-vs-spot integrity check at ingestion, self-contained (#297).** No option trades below its
+  intrinsic value, so every leg bounds the underlying from one side — a call `(K, P)` gives
+  `S ≤ K + P`, a put gives `S ≥ K − P`. A row whose stored `underlying_price` falls outside the
+  interval its own legs imply is telling two incompatible stories about one moment. The check needs
+  **no price feed**: the anchor gate inside `backfill_held_to_expiry_pnl` catches the same rows, but
+  only for tickers Yahoo serves, only inside that backfill, and only by excluding them silently.
+  `check_leg_spot_integrity` in `scripts/import.py` reports **58 rows** on the current book as import
+  warnings. A European-style slack term `K(1−e^{−rT})` is applied to SPX/SPXW/XSP/NDX/NDXP/RUT puts,
+  which legitimately trade below intrinsic — 0 rows are suppressed by it today, and without it the
+  check would eventually cry wolf on the index rows that dominate this book.
+
+### Changed
+- **#297's conclusion is wrong on two thirds of its own rows, and the fix is a classification, not a
+  repair.** The issue reported 55 rows and concluded the stored spot was wrong. It is not: **35 of
+  them are stale roll carries.** When a position is rolled the untouched side rides through with the
+  same strike, the same premium, the **same expiry**, and the parent recording no `closePremium` for
+  it (33/33 on the immediate-parent set; **0 copy-forward**). That leg was genuinely not re-traded —
+  it keeps the ancestor's entry-date fill price while the new row stores the roll date's spot. Both
+  numbers are true, on different days, and comparing them is the category error. **A repair pass that
+  rewrote the spot on the filed set would have destroyed correct data on 35 of 58 rows.** The
+  ancestry walk is transitive: trade 1589 inherits its binding call four rolls back, and an
+  immediate-parent test reports it as unexplained.
+- **The three kinds are reported, never exempted.** `STALE_CARRY` (35), `SPOT_CONTRADICTED` (21),
+  `NO_SPOT` (2). Silence on the carries would hide a real defect — a row that blends fill prices from
+  two dates still computes one `credit_received`, one max loss and one breakeven off the mixture, and
+  breakeven bias feeds POP and P50 directly. Filed as **#323** with the remedy named: leg-level
+  provenance. The exposed population is larger than the detectable one — **135 rows carry
+  `rolled_from_id`** and any of them may mix dates without tripping the intrinsic test.
+- **The spot column itself is well corroborated, which is what makes the residue interesting.** Of
+  361 same-day close→open handoffs, **351 agree to the cent** between two independently-written
+  columns on different rows; among the flagged rows, **53 of 53** that participate in a handoff are
+  corroborated. The 21 unexplained rows (**#324**) are all closed, 19 of them feed the held-to-expiry
+  counterfactual, and which of `{spot, legs}` is corrupt is not decidable from the row alone.
+- **Two rows carry no usable spot at all** — trade 1710 (`/CL`) stores `0.0`, one more stores NULL
+  (**#322**). A zero is an absent price, not a wrong one, so it gets its own kind.
+- `trades.db` is **unchanged** by this release. Every repair these findings imply is a data write that
+  belongs to its own commit and its own decision.
+
+### Testing
+- Python fixtures **106 → 118**: both leg vocabularies (`type` and `leg_type` — the first version of
+  this probe knew only one and reported a clean book across 1157 legs it could not see), the clean
+  condor, the zero spot, the four-deep roll carry against the identical leg with no ancestry, the
+  European slack in both directions, trade 1770 surviving the slack, and an anti-test that the check
+  writes nothing.
+
+---
+
 ## [3.27.0] — 2026-08-07
 
 ### Changed
