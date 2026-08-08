@@ -5,6 +5,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), version
 
 ---
 
+## [3.29.1] — 2026-08-08
+
+### Fixed
+Three defects found by the cross-vendor audit of v3.29.0, all confirmed against source (**#327**).
+
+- **The probability-calibration panel rescaled its own inputs.** `AnalyticsTab.tsx` ran
+  `const normPct = (v) => v > 1 ? v : v * 100` over `t.pop` and `calculateP50`. Both are **percents**
+  — `pop` since v3.21.0, P50 since v3.17.0 — so trade 1652's genuine **0.01%** POP was read as a
+  fraction and reported as **1%**, binned with positions a hundred times more likely to pay. This is
+  the `iv > 2` heuristic's exact shape, deleted in v3.27.0, surviving in the one panel whose entire
+  purpose is to test whether the probability model is calibrated. Guess deleted, no replacement.
+- **The multi-expiry guard treated an undated leg as evidence of a single expiry.**
+  `new Set(legs.map(l => l.expiration_date).filter(Boolean)).size > 1` drops legs carrying no date.
+  `TradeForm` *displays* the header expiry for such a leg but never writes it into the leg, so a
+  hand-entered calendar arrives with one dated leg and one undated one, yields a set of size 1, and
+  **is scanned as a vertical** — affecting max profit, max loss, width, POP and the counterfactual
+  alike. Latent until v3.29.0 routed hand-entered legs through `popFromLegs`. Now: dated and undated
+  legs together cannot establish a single expiry; no dates at all still means one expiry, the
+  header's.
+- **Edit mode kept a stale POP.** `updateTrade` builds its SET clause from the keys present in the
+  partial, so an omitted key is never written — and `...(pop != null ? { pop } : {})` left the
+  *previous* POP on a trade whose payoff can no longer support one. `pop` and `pop_at_close` are now
+  written as explicit nulls, and their types widened to `number | null`: null is a real state,
+  distinct from undefined (never computed) and emphatically from 0 (certain loss).
+
+### Testing
+- TypeScript fixtures **165 → 168** — the mixed dated/undated calendar, the both-dated vertical, and
+  the no-dates case.
+
 ## [3.29.0] — 2026-08-08
 
 ### Removed
